@@ -108,8 +108,6 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
   const [period, setPeriod] = useState("Годовой отчёт");
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [searching, setSearching] = useState(false);
-  const [browsing, setBrowsing] = useState(false);
-  const [browseStatus, setBrowseStatus] = useState("");
   const [docs, setDocs] = useState<Document[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const [error, setError] = useState("");
@@ -179,48 +177,6 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
       setError("Ошибка соединения с сервером. Проверьте интернет и попробуйте снова.");
     } finally {
       setSearching(false);
-    }
-  };
-
-  // Автопоиск документов через headless-браузер
-  const handleBrowse = async () => {
-    const inn = selected?.inn || "";
-    const name = selected?.name || query.trim();
-    if (!inn) { setError("Выберите компанию из списка чтобы найти документы автоматически"); return; }
-    setBrowsing(true);
-    setError("");
-    setDocs([]);
-    setBrowseStatus("Запускаю браузер...");
-    try {
-      setBrowseStatus("Открываю e-disclosure.ru...");
-      const res = await fetch(API.extractMetrics, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "browse", inn, company: name, year }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setError(data.error || "Ошибка браузера"); return; }
-
-      const foundDocs: Document[] = data.documents || [];
-      setDocs(foundDocs);
-      onFound({
-        company: name,
-        companyId: selected?.id || "",
-        companyUrl: data.company_page || selected?.url || "",
-        inn,
-        period,
-        year,
-        documents: foundDocs,
-      });
-      if (foundDocs.length === 0) {
-        const errs = (data.errors || []).join("; ");
-        setError(`Документы не найдены на e-disclosure.ru.${errs ? " Детали: " + errs : ""}`);
-      }
-    } catch {
-      setError("Ошибка соединения с браузером.");
-    } finally {
-      setBrowsing(false);
-      setBrowseStatus("");
     }
   };
 
@@ -301,22 +257,14 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <button onClick={handleSearch} disabled={(!selected && !query.trim()) || searching || browsing}
+        <button onClick={handleSearch} disabled={(!selected && !query.trim()) || searching}
           className="flex items-center gap-2 px-5 py-2.5 bg-gold text-background font-semibold text-sm rounded hover:bg-gold/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
           {searching
             ? <><Icon name="Loader2" size={15} className="animate-spin" />Поиск...</>
             : <><Icon name="Search" size={15} />Найти компанию</>}
         </button>
 
-        <button onClick={handleBrowse} disabled={!selected?.inn || browsing || searching}
-          title="Запускает браузер и ищет PDF на e-disclosure.ru. Первый запуск ~60 сек."
-          className="flex items-center gap-2 px-4 py-2.5 border border-surface-3 text-sm text-dim rounded hover:border-gold hover:text-gold disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-          {browsing
-            ? <><Icon name="Loader2" size={15} className="animate-spin" />{browseStatus || "Браузер работает..."}</>
-            : <><Icon name="Globe" size={15} />Найти PDF на e-disclosure</>}
-        </button>
-
-        {!searching && !browsing && docs.length > 0 && (
+        {!searching && docs.length > 0 && (
           <span className="text-xs font-mono px-2 py-0.5 rounded text-emerald-400 bg-emerald-400/10">
             Найдено {docs.length}
           </span>
@@ -397,6 +345,7 @@ function MetricsSection({ result, onExtract }: {
 }) {
   const [metricsList, setMetricsList] = useState(DEFAULT_METRICS_LIST);
   const [selectedDocUrl, setSelectedDocUrl] = useState("");
+  const [fileIdInput, setFileIdInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
@@ -404,6 +353,12 @@ function MetricsSection({ result, onExtract }: {
 
   // Только реальные файлы (не LINK)
   const fileDocs = result?.documents?.filter(d => d.type !== "LINK") ?? [];
+  const edisclosureLink = result?.documents?.find(d => d.type === "LINK");
+
+  // Финальный URL документа: из FileId или из выбранного/ручного ввода
+  const resolvedUrl = fileIdInput.trim()
+    ? `https://www.e-disclosure.ru/portal/FileLoad.ashx?Fileid=${fileIdInput.trim()}`
+    : selectedDocUrl;
 
   useEffect(() => {
     if (fileDocs.length) {
@@ -415,8 +370,8 @@ function MetricsSection({ result, onExtract }: {
   }, [result]);
 
   const handleExtract = async () => {
-    if (!selectedDocUrl.trim()) { setError("Укажите ссылку на документ (PDF или XLSX)"); return; }
-    if (!selectedDocUrl.startsWith("http")) { setError("Ссылка должна начинаться с https://"); return; }
+    if (!resolvedUrl.trim()) { setError("Укажите FileId документа или ссылку"); return; }
+    if (!resolvedUrl.startsWith("http")) { setError("Ссылка должна начинаться с https://"); return; }
     const metrics = metricsList.split("\n").map(l => l.trim()).filter(Boolean).slice(0, 20);
     if (!metrics.length) return;
 
@@ -430,7 +385,7 @@ function MetricsSection({ result, onExtract }: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          url: selectedDocUrl,
+          url: resolvedUrl,
           metrics,
           company: result?.company || "",
           year: result?.year || "",
@@ -500,18 +455,20 @@ function MetricsSection({ result, onExtract }: {
         </div>
       </div>
 
-      {/* Реальные файлы из MOEX */}
+      {/* Найденные файлы */}
       {fileDocs.length > 0 && (
         <div className="space-y-2">
-          <label className="text-xs text-dim font-medium uppercase tracking-wider">Выберите документ</label>
+          <label className="text-xs text-dim font-medium uppercase tracking-wider">Найденные документы</label>
           <div className="space-y-2">
             {fileDocs.map((doc, i) => (
               <label key={i}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded border cursor-pointer transition-all ${
-                  selectedDocUrl === doc.url ? "border-gold bg-gold/5" : "border-surface-3 hover:border-muted-foreground"
+                  selectedDocUrl === doc.url && !fileIdInput ? "border-gold bg-gold/5" : "border-surface-3 hover:border-muted-foreground"
                 }`}>
-                <input type="radio" name="doc" value={doc.url} checked={selectedDocUrl === doc.url}
-                  onChange={() => setSelectedDocUrl(doc.url)} className="accent-gold" />
+                <input type="radio" name="doc" value={doc.url}
+                  checked={selectedDocUrl === doc.url && !fileIdInput}
+                  onChange={() => { setSelectedDocUrl(doc.url); setFileIdInput(""); }}
+                  className="accent-gold" />
                 <span className={`font-mono text-xs px-1.5 py-0.5 rounded shrink-0 ${
                   doc.type === "PDF" ? "text-rose-400 bg-rose-400/10"
                   : doc.type === "ZIP" ? "text-amber-400 bg-amber-400/10"
@@ -524,41 +481,82 @@ function MetricsSection({ result, onExtract }: {
         </div>
       )}
 
-      {/* Ручной ввод URL — всегда доступен */}
-      <div className="space-y-2">
+      {/* FileId — главный способ указать документ */}
+      <div className="space-y-3">
         <div className="flex items-center justify-between">
           <label className="text-xs text-dim font-medium uppercase tracking-wider">
-            {fileDocs.length > 0 ? "Или вставьте свою ссылку на PDF / XLSX" : "Ссылка на документ (PDF или XLSX)"}
+            Номер документа (FileId) с e-disclosure.ru
           </label>
-          {result.documents.find(d => d.type === "LINK") && (
-            <a
-              href={result.documents.find(d => d.type === "LINK")!.url}
-              target="_blank" rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs text-gold hover:text-gold/70 transition-colors"
-            >
+          {edisclosureLink && (
+            <a href={edisclosureLink.url} target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs text-gold hover:text-gold/70 transition-colors">
               <Icon name="ExternalLink" size={12} />
               Открыть e-disclosure
             </a>
           )}
         </div>
-        <input
-          type="url"
-          value={fileDocs.length === 0 || !fileDocs.find(d => d.url === selectedDocUrl) ? selectedDocUrl : ""}
-          onChange={e => setSelectedDocUrl(e.target.value.trim())}
-          placeholder="https://www.e-disclosure.ru/.../report.pdf"
-          className="w-full bg-surface-2 border border-surface-3 rounded text-sm px-3 py-2.5 text-foreground placeholder:text-dim focus:outline-none focus:border-gold transition-colors font-mono"
-        />
-        {fileDocs.length === 0 && (
-          <div className="bg-surface-2 border border-surface-3 rounded px-4 py-3 space-y-1.5">
-            <p className="text-xs font-medium text-foreground/70">Как найти ссылку на PDF:</p>
-            <ol className="text-xs text-dim space-y-1 list-none">
-              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">01</span>Откройте e-disclosure.ru по кнопке выше</li>
-              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">02</span>Найдите раздел «Финансовая отчётность» → «МСФО» или «Годовой отчёт»</li>
-              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">03</span>Правой кнопкой на ссылку PDF → «Копировать адрес ссылки»</li>
-              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">04</span>Вставьте URL в поле выше и нажмите «Извлечь показатели»</li>
-            </ol>
+
+        {/* Поле ввода FileId */}
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-dim font-mono pointer-events-none select-none">
+              FileId:
+            </span>
+            <input
+              type="text"
+              value={fileIdInput}
+              onChange={e => setFileIdInput(e.target.value.replace(/\D/g, ""))}
+              placeholder="1915683"
+              className={`w-full bg-surface-2 border rounded text-sm pl-14 pr-3 py-2.5 text-foreground placeholder:text-dim focus:outline-none transition-colors font-mono ${
+                fileIdInput ? "border-gold" : "border-surface-3 focus:border-gold"
+              }`}
+            />
+          </div>
+          {fileIdInput && (
+            <button onClick={() => setFileIdInput("")}
+              className="px-3 text-dim hover:text-foreground border border-surface-3 rounded transition-colors">
+              <Icon name="X" size={14} />
+            </button>
+          )}
+        </div>
+
+        {/* Предпросмотр URL */}
+        {fileIdInput && (
+          <div className="flex items-center gap-2 bg-surface-2 border border-gold/20 rounded px-3 py-2">
+            <Icon name="Link" size={13} className="text-gold shrink-0" />
+            <span className="text-xs font-mono text-foreground/70 truncate">
+              e-disclosure.ru/portal/FileLoad.ashx?Fileid={fileIdInput}
+            </span>
+            <a href={`https://www.e-disclosure.ru/portal/FileLoad.ashx?Fileid=${fileIdInput}`}
+              target="_blank" rel="noopener noreferrer"
+              className="ml-auto text-gold hover:text-gold/70 shrink-0">
+              <Icon name="ExternalLink" size={13} />
+            </a>
           </div>
         )}
+
+        {/* Инструкция */}
+        <div className="bg-surface-2 border border-surface-3 rounded px-4 py-3 space-y-2">
+          <p className="text-xs font-medium text-foreground/70">Как найти FileId на e-disclosure.ru:</p>
+          <ol className="text-xs text-dim space-y-1.5 list-none">
+            <li className="flex gap-2.5">
+              <span className="text-gold font-mono shrink-0 w-5">01</span>
+              <span>Нажмите «Открыть e-disclosure» → найдите компанию</span>
+            </li>
+            <li className="flex gap-2.5">
+              <span className="text-gold font-mono shrink-0 w-5">02</span>
+              <span>Перейдите в раздел «МСФО» или «Годовой отчёт»</span>
+            </li>
+            <li className="flex gap-2.5">
+              <span className="text-gold font-mono shrink-0 w-5">03</span>
+              <span>Наведите на ссылку PDF — в строке браузера появится URL вида <span className="font-mono text-gold">...FileLoad.ashx?Fileid=<strong>1234567</strong></span></span>
+            </li>
+            <li className="flex gap-2.5">
+              <span className="text-gold font-mono shrink-0 w-5">04</span>
+              <span>Скопируйте число и вставьте в поле выше</span>
+            </li>
+          </ol>
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -583,7 +581,8 @@ function MetricsSection({ result, onExtract }: {
         </div>
       )}
 
-      <button onClick={handleExtract} disabled={lineCount === 0 || lineCount > 20 || loading}
+      <button onClick={handleExtract}
+        disabled={lineCount === 0 || lineCount > 20 || loading || !resolvedUrl}
         className="flex items-center gap-2 px-5 py-2.5 bg-gold text-background font-semibold text-sm rounded hover:bg-gold/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
         {loading
           ? <><Icon name="Loader2" size={15} className="animate-spin" />{progress || "Извлекаю данные..."}</>
