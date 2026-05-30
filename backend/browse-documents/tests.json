@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "Диагностика окружения",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"python": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

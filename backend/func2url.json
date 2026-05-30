@@ -1,4 +1,5 @@
 {
   "extract-metrics": "https://functions.poehali.dev/85428a9a-38cb-4114-ba2e-89091669ed2d",
-  "search-company": "https://functions.poehali.dev/5e410c54-9c7f-4d75-8358-2fa7f2241336"
+  "search-company": "https://functions.poehali.dev/5e410c54-9c7f-4d75-8358-2fa7f2241336",
+  "browse-documents": ""
 }
