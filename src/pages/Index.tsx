@@ -59,7 +59,8 @@ interface HistoryEntry {
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
-const YEARS = ["2024", "2023", "2022", "2021", "2020", "2019"];
+const CURRENT_YEAR = new Date().getFullYear();
+const YEARS = Array.from({ length: CURRENT_YEAR - 1990 + 1 }, (_, i) => String(CURRENT_YEAR - i));
 const PERIODS = ["Годовой отчёт", "1 квартал", "6 месяцев (1П)", "9 месяцев (3К)", "1П + 9 месяцев"];
 
 const DEFAULT_METRICS_LIST = `Выручка
