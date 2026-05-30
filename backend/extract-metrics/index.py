@@ -32,6 +32,22 @@ def handler(event: dict, context) -> dict:
     except Exception:
         body = {}
 
+    # Режим поиска документов через headless-браузер
+    if body.get("action") == "browse":
+        inn     = body.get("inn", "").strip()
+        company = body.get("company", "").strip()
+        year    = body.get("year", "2023").strip()
+        if not inn:
+            return _err(400, "Параметр inn обязателен для action=browse")
+        try:
+            import browser as br
+            result = br.browse_edisclosure(inn, company, year)
+            result.update({"inn": inn, "company": company, "year": year})
+            return {"statusCode": 200, "headers": CORS_HEADERS,
+                    "body": json.dumps(result, ensure_ascii=False)}
+        except Exception as e:
+            return _err(500, f"Браузер: {str(e)[:300]}")
+
     doc_url = body.get("url", "").strip()
     metrics  = body.get("metrics", [])
     company  = body.get("company", "")

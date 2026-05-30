@@ -108,6 +108,8 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
   const [period, setPeriod] = useState("Годовой отчёт");
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+  const [browseStatus, setBrowseStatus] = useState("");
   const [docs, setDocs] = useState<Document[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const [error, setError] = useState("");
@@ -177,6 +179,48 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
       setError("Ошибка соединения с сервером. Проверьте интернет и попробуйте снова.");
     } finally {
       setSearching(false);
+    }
+  };
+
+  // Автопоиск документов через headless-браузер
+  const handleBrowse = async () => {
+    const inn = selected?.inn || "";
+    const name = selected?.name || query.trim();
+    if (!inn) { setError("Выберите компанию из списка чтобы найти документы автоматически"); return; }
+    setBrowsing(true);
+    setError("");
+    setDocs([]);
+    setBrowseStatus("Запускаю браузер...");
+    try {
+      setBrowseStatus("Открываю e-disclosure.ru...");
+      const res = await fetch(API.extractMetrics, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "browse", inn, company: name, year }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Ошибка браузера"); return; }
+
+      const foundDocs: Document[] = data.documents || [];
+      setDocs(foundDocs);
+      onFound({
+        company: name,
+        companyId: selected?.id || "",
+        companyUrl: data.company_page || selected?.url || "",
+        inn,
+        period,
+        year,
+        documents: foundDocs,
+      });
+      if (foundDocs.length === 0) {
+        const errs = (data.errors || []).join("; ");
+        setError(`Документы не найдены на e-disclosure.ru.${errs ? " Детали: " + errs : ""}`);
+      }
+    } catch {
+      setError("Ошибка соединения с браузером.");
+    } finally {
+      setBrowsing(false);
+      setBrowseStatus("");
     }
   };
 
@@ -256,14 +300,23 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
         </div>
       </div>
 
-      <div className="flex items-center gap-4">
-        <button onClick={handleSearch} disabled={(!selected && !query.trim()) || searching}
+      <div className="flex flex-wrap items-center gap-3">
+        <button onClick={handleSearch} disabled={(!selected && !query.trim()) || searching || browsing}
           className="flex items-center gap-2 px-5 py-2.5 bg-gold text-background font-semibold text-sm rounded hover:bg-gold/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
           {searching
-            ? <><Icon name="Loader2" size={15} className="animate-spin" />Поиск документов...</>
-            : <><Icon name="FileSearch" size={15} />Найти отчётность</>}
+            ? <><Icon name="Loader2" size={15} className="animate-spin" />Поиск...</>
+            : <><Icon name="Search" size={15} />Найти компанию</>}
         </button>
-        {!searching && docs.length > 0 && (
+
+        <button onClick={handleBrowse} disabled={!selected?.inn || browsing || searching}
+          title="Запускает браузер и ищет PDF на e-disclosure.ru. Первый запуск ~60 сек."
+          className="flex items-center gap-2 px-4 py-2.5 border border-surface-3 text-sm text-dim rounded hover:border-gold hover:text-gold disabled:opacity-40 disabled:cursor-not-allowed transition-all">
+          {browsing
+            ? <><Icon name="Loader2" size={15} className="animate-spin" />{browseStatus || "Браузер работает..."}</>
+            : <><Icon name="Globe" size={15} />Найти PDF на e-disclosure</>}
+        </button>
+
+        {!searching && !browsing && docs.length > 0 && (
           <span className="text-xs font-mono px-2 py-0.5 rounded text-emerald-400 bg-emerald-400/10">
             Найдено {docs.length}
           </span>

@@ -86,9 +86,7 @@ def _search_moex(query: str) -> list:
     """
     url = (
         f"{MOEX_BASE}/securities.json"
-        f"?q={urllib.parse.quote(query)}"
-        f"&limit=50"
-        f"&iss.meta=off"
+        f"?q={urllib.parse.quote(query)}&limit=50&iss.meta=off"
         f"&securities.columns=secid,shortname,name,emitent_id,emitent_title,emitent_inn,is_traded"
     )
 
@@ -99,11 +97,8 @@ def _search_moex(query: str) -> list:
     if not rows:
         return []
 
-    # Индексы нужных колонок
     idx = {c: i for i, c in enumerate(cols)}
-
     seen_inns = set()
-    seen_emitent_ids = set()
     companies = []
 
     for row in rows:
@@ -111,33 +106,22 @@ def _search_moex(query: str) -> list:
         emitent_id   = row[idx.get("emitent_id", -1)]
         emitent_inn  = row[idx.get("emitent_inn", -1)] or ""
         emitent_name = row[idx.get("emitent_title", -1)] or row[idx.get("name", -1)] or ""
-        is_traded    = row[idx.get("is_traded", -1)]
 
-        # Берём только торгующиеся бумаги с ИНН
         if not emitent_inn or not emitent_name:
             continue
-
-        # Дедупликация по эмитенту
         key = emitent_inn or str(emitent_id)
         if key in seen_inns:
             continue
         seen_inns.add(key)
 
-        # Ссылка на e-disclosure через поиск по ИНН
-        edisclosure_url = (
-            f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam"
-            f"?innNumber={emitent_inn}&onlyMatches=1"
-        ) if emitent_inn else ""
-
         companies.append({
-            "id": str(emitent_id or ""),
-            "name": emitent_name.strip(),
-            "inn": emitent_inn,
+            "id":     str(emitent_id or ""),
+            "name":   emitent_name.strip(),
+            "inn":    emitent_inn,
             "ticker": secid,
-            "url": edisclosure_url,
+            "url":    f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={emitent_inn}&onlyMatches=1",
             "source": "moex",
         })
-
         if len(companies) >= 8:
             break
 
@@ -145,112 +129,75 @@ def _search_moex(query: str) -> list:
 
 
 def _build_edisclosure_links(company: dict, year: str) -> list:
-    """
-    Формирует список прямых ссылок на e-disclosure.ru для компании.
-    Использует ИНН для построения URL поиска и страниц раскрытия.
-    """
-    inn = company.get("inn", "")
+    inn  = company.get("inn", "")
     name = company.get("name", "")
-    ticker = company.get("ticker", "")
     docs = []
 
     if inn:
-        # Прямой поиск по ИНН на e-disclosure
         docs.append({
-            "name": f"Поиск отчётности {name} ({year}) на e-disclosure.ru",
-            "type": "LINK",
-            "url": f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1",
-            "source": "e-disclosure.ru",
-            "size": "",
+            "name":        f"Поиск отчётности {name} ({year}) на e-disclosure.ru",
+            "type":        "LINK",
+            "url":         f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1",
+            "source":      "e-disclosure.ru",
+            "size":        "",
             "description": f"Все документы компании с ИНН {inn}",
         })
-
-        # Страница раскрытия информации
         docs.append({
-            "name": f"Раскрытие информации {name} — e-disclosure.ru",
-            "type": "LINK",
-            "url": f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1&year={year}",
-            "source": "e-disclosure.ru",
-            "size": "",
+            "name":        f"Раскрытие информации {name} — e-disclosure.ru",
+            "type":        "LINK",
+            "url":         f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1&year={year}",
+            "source":      "e-disclosure.ru",
+            "size":        "",
             "description": f"Документы за {year} год",
         })
 
-    # Попробуем получить реальные файлы через MOEX API (disclosure)
     moex_docs = _fetch_moex_filings(company, year)
     docs.extend(moex_docs)
-
     return docs
 
 
 def _fetch_moex_filings(company: dict, year: str) -> list:
-    """
-    Получает список документов через MOEX ISS /iss/engines/stock/markets/shares/securities/{ticker}/
-    и disclosure API.
-    """
     ticker = company.get("ticker", "")
-    emitent_id = company.get("id", "")
-    docs = []
-
     if not ticker:
-        return docs
-
-    # MOEX disclosure — годовые отчёты и МСФО
-    disclosure_url = (
-        f"{MOEX_BASE}/securities/{ticker}/disclosure.json"
-        f"?iss.meta=off&limit=20"
-    )
+        return []
+    docs = []
     try:
-        data = _fetch_json(disclosure_url)
-        # disclosure содержит секцию filings или reports
+        data = _fetch_json(f"{MOEX_BASE}/securities/{ticker}/disclosure.json?iss.meta=off&limit=20")
         for section_key in ("disclosure", "filings", "reports"):
             section = data.get(section_key, {})
-            rows = section.get("data", [])
-            cols = section.get("columns", [])
+            rows    = section.get("data", [])
+            cols    = section.get("columns", [])
             if not rows:
                 continue
             idx = {c: i for i, c in enumerate(cols)}
             for row in rows:
-                title  = _get(row, idx, "title") or _get(row, idx, "name") or ""
-                url    = _get(row, idx, "url") or _get(row, idx, "fileUrl") or ""
-                ftype  = _get(row, idx, "type") or ""
-                date   = _get(row, idx, "date") or _get(row, idx, "publishedDate") or ""
-
+                title = _get(row, idx, "title") or _get(row, idx, "name") or ""
+                url   = _get(row, idx, "url") or _get(row, idx, "fileUrl") or ""
+                ftype = _get(row, idx, "type") or ""
+                date  = _get(row, idx, "date") or _get(row, idx, "publishedDate") or ""
                 if not url or not title:
                     continue
-                # Фильтр по году
                 if year and year not in str(date) and year not in title and year not in url:
                     continue
-
                 ext = _guess_ext(url, ftype)
                 if not url.startswith("http"):
                     url = MOEX_BASE + url
-
-                docs.append({
-                    "name": title[:150],
-                    "type": ext,
-                    "url": url,
-                    "source": "moex.com",
-                    "size": "",
-                })
+                docs.append({"name": title[:150], "type": ext, "url": url, "source": "moex.com", "size": ""})
                 if len(docs) >= 8:
                     return docs
     except Exception:
         pass
-
     return docs
 
 
-def _get(row: list, idx: dict, key: str):
+def _get(row, idx, key):
     i = idx.get(key, -1)
-    if i < 0 or i >= len(row):
-        return None
-    return row[i]
+    return row[i] if 0 <= i < len(row) else None
 
 
-def _guess_ext(url: str, ftype: str) -> str:
-    url_clean = url.split("?")[0].lower()
+def _guess_ext(url, ftype):
     for ext in ("pdf", "xlsx", "xls", "zip", "rar"):
-        if url_clean.endswith(f".{ext}"):
+        if url.split("?")[0].lower().endswith(f".{ext}"):
             return ext.upper()
     if "pdf" in ftype.lower():
         return "PDF"
