@@ -1,12 +1,10 @@
 """
-Поиск компании на e-disclosure.ru и получение списка документов отчётности.
-Обход антибот-защиты: реальные браузерные заголовки, сессионные куки, gzip, Referer-цепочка.
+Поиск компании через MOEX ISS API (Московская биржа) — официальный, бесплатный, без защиты.
+Возвращает ИНН, полное название, тикер и прямую ссылку на страницу компании на e-disclosure.ru.
 """
 import json
 import re
 import gzip
-import time
-import http.cookiejar
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -19,68 +17,12 @@ CORS_HEADERS = {
     "Content-Type": "application/json",
 }
 
-BASE = "https://www.e-disclosure.ru"
-
-# Заголовки реального браузера Chrome 124 Windows
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-User": "?1",
-    "Sec-Fetch-Dest": "document",
-    "Upgrade-Insecure-Requests": "1",
-    "Connection": "keep-alive",
-}
-
-
-def _make_opener() -> urllib.request.OpenerDirector:
-    """Создаёт opener с куки-jar, редиректами и gzip."""
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(jar),
-        urllib.request.HTTPRedirectHandler(),
-    )
-    return opener
-
-
-def _fetch(opener: urllib.request.OpenerDirector, url: str, referer: str = BASE, timeout: int = 12) -> str:
-    """Загружает страницу с браузерными заголовками, возвращает HTML-строку."""
-    headers = {**BROWSER_HEADERS, "Referer": referer}
-    req = urllib.request.Request(url, headers=headers)
-    with opener.open(req, timeout=timeout) as resp:
-        raw = resp.read()
-        enc = resp.headers.get("Content-Encoding", "")
-        if enc == "gzip":
-            raw = gzip.decompress(raw)
-        elif enc == "br":
-            # Если br недоступен — пробуем как есть
-            try:
-                import brotli
-                raw = brotli.decompress(raw)
-            except Exception:
-                pass
-        charset = _detect_charset(resp.headers.get("Content-Type", ""))
-        return raw.decode(charset, errors="replace")
-
-
-def _detect_charset(content_type: str) -> str:
-    m = re.search(r'charset=([^\s;]+)', content_type, re.IGNORECASE)
-    return m.group(1) if m else "utf-8"
+MOEX_BASE = "https://iss.moex.com/iss"
+EDISCLOSURE_BASE = "https://www.e-disclosure.ru"
 
 
 def handler(event: dict, context) -> dict:
-    """Поиск компании по названию/ИНН/тикеру на e-disclosure.ru, возвращает список документов."""
+    """Поиск компании по названию/ИНН/тикеру через MOEX ISS API. Возвращает список компаний и документы на e-disclosure.ru."""
 
     if event.get("httpMethod") == "OPTIONS":
         return {"statusCode": 200, "headers": CORS_HEADERS, "body": ""}
@@ -88,7 +30,6 @@ def handler(event: dict, context) -> dict:
     params = event.get("queryStringParameters") or {}
     query = params.get("query", "").strip()
     year = params.get("year", "2023").strip()
-    period = params.get("period", "annual").strip()
 
     if not query:
         return {
@@ -97,312 +38,222 @@ def handler(event: dict, context) -> dict:
             "body": json.dumps({"error": "Параметр query обязателен"}, ensure_ascii=False),
         }
 
-    opener = _make_opener()
-    debug = {}
-
-    # Шаг 1: «прогреваем» сессию — заходим на главную, получаем куки
-    try:
-        _fetch(opener, BASE + "/", referer=BASE, timeout=8)
-        debug["warmup"] = "ok"
-    except Exception as e:
-        debug["warmup"] = str(e)
-
-    # Шаг 2: ищем компании
-    companies, debug_search = _search_companies(opener, query)
-    debug["search"] = debug_search
+    companies = _search_moex(query)
 
     if not companies:
         return {
             "statusCode": 200,
             "headers": CORS_HEADERS,
-            "body": json.dumps({"companies": [], "documents": [], "query": query, "debug": debug}, ensure_ascii=False),
+            "body": json.dumps({"companies": [], "documents": [], "query": query}, ensure_ascii=False),
         }
 
     top = companies[0]
-    documents = _fetch_documents(opener, top["id"], year) if top["id"] else []
+    documents = _build_edisclosure_links(top, year)
 
     return {
         "statusCode": 200,
         "headers": CORS_HEADERS,
         "body": json.dumps({
             "query": query,
-            "companies": companies[:8],
+            "companies": companies,
             "selected": top,
             "documents": documents,
         }, ensure_ascii=False),
     }
 
 
-def _search_companies(opener: urllib.request.OpenerDirector, query: str):
-    """Поиск через внутренний Ajax-endpoint e-disclosure.ru. Возвращает (list, debug_dict)."""
-    dbg = {}
-
-    # Вариант 1: Ajax-автодополнение
-    ajax_url = f"{BASE}/Search/Autocomplete?term={urllib.parse.quote(query)}&searchType=1"
-    try:
-        req = urllib.request.Request(
-            ajax_url,
-            headers={
-                **BROWSER_HEADERS,
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": f"{BASE}/poisk-po-kompaniyam",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Dest": "empty",
-            }
-        )
-        with opener.open(req, timeout=10) as resp:
-            raw = resp.read()
-            enc = resp.headers.get("Content-Encoding", "")
-            if enc == "gzip":
-                raw = gzip.decompress(raw)
-            text = raw.decode("utf-8", errors="replace")
-            dbg["autocomplete_status"] = resp.status
-            dbg["autocomplete_snippet"] = text[:300]
-            data = json.loads(text)
-            if isinstance(data, list) and data:
-                return [_normalize_autocomplete(c) for c in data[:8] if c], dbg
-    except Exception as e:
-        dbg["autocomplete_error"] = str(e)
-
-    # Вариант 2: JSON-поиск
-    for search_path in [
-        f"/poisk-po-kompaniyam?query={urllib.parse.quote(query)}&format=json",
-        f"/Search/Search?query={urllib.parse.quote(query)}&page=1&pageSize=10",
-    ]:
-        try:
-            req = urllib.request.Request(
-                BASE + search_path,
-                headers={
-                    **BROWSER_HEADERS,
-                    "Accept": "application/json",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": f"{BASE}/poisk-po-kompaniyam",
-                }
-            )
-            with opener.open(req, timeout=10) as resp:
-                raw = resp.read()
-                enc = resp.headers.get("Content-Encoding", "")
-                if enc == "gzip":
-                    raw = gzip.decompress(raw)
-                text = raw.decode("utf-8", errors="replace")
-                dbg[f"json_{search_path[:40]}_status"] = resp.status
-                dbg[f"json_{search_path[:40]}_snippet"] = text[:300]
-                data = json.loads(text)
-                items = data.get("items") or data.get("companies") or data.get("results") or []
-                if items:
-                    return [_normalize_company(c) for c in items[:8] if c], dbg
-        except Exception as e:
-            dbg[f"json_error_{search_path[:40]}"] = str(e)
-
-    # Вариант 3: HTML-скрапинг
-    result, html_dbg = _search_html(opener, query)
-    dbg["html"] = html_dbg
-    return result, dbg
+def _fetch_json(url: str) -> dict:
+    """GET-запрос к MOEX ISS API, возвращает распарсенный JSON."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; FinReport/1.0)",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+        }
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+        return json.loads(raw.decode("utf-8"))
 
 
-def _search_html(opener: urllib.request.OpenerDirector, query: str):
-    """Скрапинг HTML страницы поиска e-disclosure.ru. Возвращает (list, debug_dict)."""
-    url = f"{BASE}/poisk-po-kompaniyam?query={urllib.parse.quote(query)}"
-    dbg = {"url": url}
-    try:
-        html = _fetch(opener, url, referer=BASE + "/")
-        dbg["html_len"] = len(html)
-        dbg["html_snippet"] = html[:500]
-        companies = _parse_companies_html(html)
-        dbg["parsed_count"] = len(companies)
-        return companies, dbg
-    except Exception as e:
-        dbg["error"] = str(e)
-        return [], dbg
+def _search_moex(query: str) -> list:
+    """
+    Поиск через MOEX ISS /iss/securities.json.
+    Возвращает дедуплицированный список эмитентов (не бумаг).
+    """
+    url = (
+        f"{MOEX_BASE}/securities.json"
+        f"?q={urllib.parse.quote(query)}"
+        f"&limit=50"
+        f"&iss.meta=off"
+        f"&securities.columns=secid,shortname,name,emitent_id,emitent_title,emitent_inn,is_traded"
+    )
 
+    data = _fetch_json(url)
+    rows = data.get("securities", {}).get("data", [])
+    cols = data.get("securities", {}).get("columns", [])
 
-def _parse_companies_html(html: str) -> list:
-    """Парсинг результатов поиска из HTML."""
+    if not rows:
+        return []
+
+    # Индексы нужных колонок
+    idx = {c: i for i, c in enumerate(cols)}
+
+    seen_inns = set()
+    seen_emitent_ids = set()
     companies = []
 
-    # Паттерн 1: ссылки на company.aspx
-    pattern = re.compile(
-        r'href="[^"]*company\.aspx\?id=(\d+)"[^>]*>\s*([^<]{3,150})</a>',
-        re.IGNORECASE
-    )
-    seen_ids = set()
-    for m in pattern.finditer(html):
-        company_id = m.group(1)
-        if company_id in seen_ids:
+    for row in rows:
+        secid        = row[idx.get("secid", -1)] or ""
+        emitent_id   = row[idx.get("emitent_id", -1)]
+        emitent_inn  = row[idx.get("emitent_inn", -1)] or ""
+        emitent_name = row[idx.get("emitent_title", -1)] or row[idx.get("name", -1)] or ""
+        is_traded    = row[idx.get("is_traded", -1)]
+
+        # Берём только торгующиеся бумаги с ИНН
+        if not emitent_inn or not emitent_name:
             continue
-        seen_ids.add(company_id)
-        name = re.sub(r'\s+', ' ', m.group(2)).strip()
-        # Пропускаем служебные ссылки
-        if len(name) < 4 or name.lower() in ("подробнее", "открыть", "перейти"):
+
+        # Дедупликация по эмитенту
+        key = emitent_inn or str(emitent_id)
+        if key in seen_inns:
             continue
-        # Ищем ИНН рядом
-        inn = _find_inn_near(html, m.start(), m.end())
+        seen_inns.add(key)
+
+        # Ссылка на e-disclosure через поиск по ИНН
+        edisclosure_url = (
+            f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam"
+            f"?innNumber={emitent_inn}&onlyMatches=1"
+        ) if emitent_inn else ""
+
         companies.append({
-            "id": company_id,
-            "name": name[:150],
-            "inn": inn,
-            "url": f"{BASE}/portal/company.aspx?id={company_id}",
+            "id": str(emitent_id or ""),
+            "name": emitent_name.strip(),
+            "inn": emitent_inn,
+            "ticker": secid,
+            "url": edisclosure_url,
+            "source": "moex",
         })
+
         if len(companies) >= 8:
             break
 
     return companies
 
 
-def _find_inn_near(html: str, start: int, end: int) -> str:
-    """Ищет ИНН в радиусе 500 символов вокруг найденного совпадения."""
-    window = html[max(0, start - 200): min(len(html), end + 500)]
-    m = re.search(r'ИНН[:\s]*(\d{10,12})', window)
-    return m.group(1) if m else ""
-
-
-def _normalize_autocomplete(c) -> dict:
-    """Нормализация ответа автодополнения."""
-    if isinstance(c, str):
-        return {"id": "", "name": c, "inn": "", "url": ""}
-    cid = str(c.get("id") or c.get("companyId") or c.get("Id") or "")
-    return {
-        "id": cid,
-        "name": c.get("label") or c.get("value") or c.get("name") or c.get("Name") or "",
-        "inn": c.get("inn") or c.get("INN") or c.get("Inn") or "",
-        "url": f"{BASE}/portal/company.aspx?id={cid}" if cid else "",
-    }
-
-
-def _normalize_company(c: dict) -> dict:
-    cid = str(c.get("id") or c.get("companyId") or "")
-    return {
-        "id": cid,
-        "name": c.get("name") or c.get("companyName") or c.get("fullName") or "",
-        "inn": c.get("inn") or c.get("INN") or "",
-        "url": f"{BASE}/portal/company.aspx?id={cid}",
-    }
-
-
-def _fetch_documents(opener: urllib.request.OpenerDirector, company_id: str, year: str) -> list:
-    """Получение документов со страницы компании."""
-    if not company_id:
-        return []
-
-    # Сначала пробуем API раскрытия информации
-    docs = _fetch_docs_via_api(opener, company_id, year)
-    if docs:
-        return docs
-
-    # Fallback: скрапинг страницы компании
-    url = f"{BASE}/portal/company.aspx?id={company_id}"
-    try:
-        html = _fetch(opener, url, referer=f"{BASE}/poisk-po-kompaniyam")
-        return _parse_documents_html(html, year, company_id)
-    except Exception:
-        return []
-
-
-def _fetch_docs_via_api(opener: urllib.request.OpenerDirector, company_id: str, year: str) -> list:
-    """Запрос документов через Ajax API e-disclosure.ru."""
-    # Эндпоинт раскрытия документов
-    api_url = (
-        f"{BASE}/portal/company.aspx?id={company_id}"
-        f"&attempt=1"
-    )
-    # Пробуем Ajax-запрос за списком документов
-    for endpoint in [
-        f"{BASE}/GetCompanyReports?companyId={company_id}&year={year}",
-        f"{BASE}/portal/getdisclosure.aspx?id={company_id}&year={year}",
-    ]:
-        try:
-            req = urllib.request.Request(
-                endpoint,
-                headers={
-                    **BROWSER_HEADERS,
-                    "Accept": "application/json",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": f"{BASE}/portal/company.aspx?id={company_id}",
-                }
-            )
-            with opener.open(req, timeout=8) as resp:
-                raw = resp.read()
-                enc = resp.headers.get("Content-Encoding", "")
-                if enc == "gzip":
-                    raw = gzip.decompress(raw)
-                data = json.loads(raw.decode("utf-8", errors="replace"))
-                docs = _extract_docs_from_json(data, year)
-                if docs:
-                    return docs
-        except Exception:
-            continue
-    return []
-
-
-def _extract_docs_from_json(data, year: str) -> list:
-    """Извлечение документов из JSON-ответа."""
-    docs = []
-    items = data if isinstance(data, list) else (
-        data.get("documents") or data.get("files") or data.get("reports") or []
-    )
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        url = item.get("url") or item.get("fileUrl") or item.get("path") or ""
-        name = item.get("name") or item.get("title") or item.get("fileName") or ""
-        if not url:
-            continue
-        if year and year not in url and year not in name:
-            continue
-        ext = url.split(".")[-1].upper().split("?")[0] if "." in url else "PDF"
-        if ext not in ("PDF", "XLS", "XLSX", "ZIP", "RAR"):
-            ext = "PDF"
-        if not url.startswith("http"):
-            url = BASE + url
-        docs.append({"name": name[:150] or url.split("/")[-1], "type": ext, "url": url, "source": "e-disclosure.ru", "size": ""})
-        if len(docs) >= 10:
-            break
-    return docs
-
-
-def _parse_documents_html(html: str, year: str, company_id: str) -> list:
-    """Парсинг документов из HTML страницы компании."""
+def _build_edisclosure_links(company: dict, year: str) -> list:
+    """
+    Формирует список прямых ссылок на e-disclosure.ru для компании.
+    Использует ИНН для построения URL поиска и страниц раскрытия.
+    """
+    inn = company.get("inn", "")
+    name = company.get("name", "")
+    ticker = company.get("ticker", "")
     docs = []
 
-    # Ссылки на файлы
-    file_pat = re.compile(
-        r'href="(/[^"]*\.(pdf|xls|xlsx|zip|rar)(?:\?[^"]*)?)"[^>]*>([^<]{2,150})',
-        re.IGNORECASE
-    )
-    for m in file_pat.finditer(html):
-        path = m.group(1)
-        ext = m.group(2).upper()
-        name = re.sub(r'\s+', ' ', m.group(3)).strip()
-        if not name or len(name) < 3:
-            name = path.split("/")[-1].split("?")[0]
-        if year and year not in path and year not in name and year not in html[max(0, m.start()-300):m.start()]:
-            continue
+    if inn:
+        # Прямой поиск по ИНН на e-disclosure
         docs.append({
-            "name": name[:150],
-            "type": ext,
-            "url": BASE + path if path.startswith("/") else path,
+            "name": f"Поиск отчётности {name} ({year}) на e-disclosure.ru",
+            "type": "LINK",
+            "url": f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1",
             "source": "e-disclosure.ru",
             "size": "",
+            "description": f"Все документы компании с ИНН {inn}",
         })
-        if len(docs) >= 10:
-            break
 
-    # Если по году ничего — берём без фильтра (первые 5)
-    if not docs:
-        for m in file_pat.finditer(html):
-            path = m.group(1)
-            ext = m.group(2).upper()
-            name = re.sub(r'\s+', ' ', m.group(3)).strip() or path.split("/")[-1]
-            docs.append({
-                "name": name[:150],
-                "type": ext,
-                "url": BASE + path if path.startswith("/") else path,
-                "source": "e-disclosure.ru",
-                "size": "",
-            })
-            if len(docs) >= 5:
-                break
+        # Страница раскрытия информации
+        docs.append({
+            "name": f"Раскрытие информации {name} — e-disclosure.ru",
+            "type": "LINK",
+            "url": f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1&year={year}",
+            "source": "e-disclosure.ru",
+            "size": "",
+            "description": f"Документы за {year} год",
+        })
+
+    # Попробуем получить реальные файлы через MOEX API (disclosure)
+    moex_docs = _fetch_moex_filings(company, year)
+    docs.extend(moex_docs)
 
     return docs
+
+
+def _fetch_moex_filings(company: dict, year: str) -> list:
+    """
+    Получает список документов через MOEX ISS /iss/engines/stock/markets/shares/securities/{ticker}/
+    и disclosure API.
+    """
+    ticker = company.get("ticker", "")
+    emitent_id = company.get("id", "")
+    docs = []
+
+    if not ticker:
+        return docs
+
+    # MOEX disclosure — годовые отчёты и МСФО
+    disclosure_url = (
+        f"{MOEX_BASE}/securities/{ticker}/disclosure.json"
+        f"?iss.meta=off&limit=20"
+    )
+    try:
+        data = _fetch_json(disclosure_url)
+        # disclosure содержит секцию filings или reports
+        for section_key in ("disclosure", "filings", "reports"):
+            section = data.get(section_key, {})
+            rows = section.get("data", [])
+            cols = section.get("columns", [])
+            if not rows:
+                continue
+            idx = {c: i for i, c in enumerate(cols)}
+            for row in rows:
+                title  = _get(row, idx, "title") or _get(row, idx, "name") or ""
+                url    = _get(row, idx, "url") or _get(row, idx, "fileUrl") or ""
+                ftype  = _get(row, idx, "type") or ""
+                date   = _get(row, idx, "date") or _get(row, idx, "publishedDate") or ""
+
+                if not url or not title:
+                    continue
+                # Фильтр по году
+                if year and year not in str(date) and year not in title and year not in url:
+                    continue
+
+                ext = _guess_ext(url, ftype)
+                if not url.startswith("http"):
+                    url = MOEX_BASE + url
+
+                docs.append({
+                    "name": title[:150],
+                    "type": ext,
+                    "url": url,
+                    "source": "moex.com",
+                    "size": "",
+                })
+                if len(docs) >= 8:
+                    return docs
+    except Exception:
+        pass
+
+    return docs
+
+
+def _get(row: list, idx: dict, key: str):
+    i = idx.get(key, -1)
+    if i < 0 or i >= len(row):
+        return None
+    return row[i]
+
+
+def _guess_ext(url: str, ftype: str) -> str:
+    url_clean = url.split("?")[0].lower()
+    for ext in ("pdf", "xlsx", "xls", "zip", "rar"):
+        if url_clean.endswith(f".{ext}"):
+            return ext.upper()
+    if "pdf" in ftype.lower():
+        return "PDF"
+    if "xls" in ftype.lower():
+        return "XLSX"
+    return "PDF"

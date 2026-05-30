@@ -13,7 +13,7 @@
       "method": "GET",
       "path": "/?query=7707083893&year=2023",
       "expectedStatus": 200,
-      "expectedBody": {"companies": []},
+      "expectedBody": {"query": "string"},
       "bodyMatcher": "partial"
     },
     {

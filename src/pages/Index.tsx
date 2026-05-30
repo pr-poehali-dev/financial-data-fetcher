@@ -16,7 +16,9 @@ interface Company {
   id: string;
   name: string;
   inn: string;
+  ticker?: string;
   url: string;
+  source?: string;
 }
 
 interface Document {
@@ -217,12 +219,14 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
               <div className="absolute top-full mt-1 w-full bg-surface-1 border border-surface-3 rounded z-50 overflow-hidden shadow-2xl">
                 {suggestions.map((c, i) => (
                   <button key={c.id || i} onClick={() => selectCompany(c)}
-                    className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-surface-2 text-left transition-colors">
-                    <div>
-                      <div className="text-sm font-medium text-foreground">{c.name}</div>
+                    className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-surface-2 text-left transition-colors gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-foreground truncate">{c.name}</div>
                       {c.inn && <div className="text-xs text-dim">ИНН {c.inn}</div>}
                     </div>
-                    <Icon name="ExternalLink" size={12} className="text-dim shrink-0" />
+                    {c.ticker && (
+                      <span className="font-mono text-xs text-gold bg-gold/10 px-1.5 py-0.5 rounded shrink-0">{c.ticker}</span>
+                    )}
                   </button>
                 ))}
               </div>
@@ -282,26 +286,36 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
           </div>
           <div className="space-y-2">
             {docs.map((doc, i) => (
-              <div key={i} className="flex items-center justify-between bg-surface-2 border border-surface-3 rounded px-4 py-3 hover:border-gold/40 transition-colors">
+              <a key={i} href={doc.url} target="_blank" rel="noopener noreferrer"
+                className={`flex items-center justify-between rounded px-4 py-3 border transition-colors hover:border-gold/60 group ${
+                  doc.type === "LINK"
+                    ? "bg-gold/5 border-gold/20"
+                    : "bg-surface-2 border-surface-3"
+                }`}>
                 <div className="flex items-center gap-3 min-w-0">
                   <span className={`font-mono text-xs px-1.5 py-0.5 rounded shrink-0 ${
-                    doc.type === "PDF" ? "text-rose-400 bg-rose-400/10"
+                    doc.type === "PDF"  ? "text-rose-400 bg-rose-400/10"
                     : doc.type === "ZIP" || doc.type === "RAR" ? "text-amber-400 bg-amber-400/10"
+                    : doc.type === "LINK" ? "text-gold bg-gold/10"
                     : "text-emerald-400 bg-emerald-400/10"
-                  }`}>{doc.type}</span>
-                  <span className="text-sm text-foreground truncate">{doc.name}</span>
+                  }`}>{doc.type === "LINK" ? "САЙТ" : doc.type}</span>
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground truncate">{doc.name}</div>
+                    {(doc as Document & { description?: string }).description && (
+                      <div className="text-xs text-dim">{(doc as Document & { description?: string }).description}</div>
+                    )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-3 shrink-0 ml-2">
                   {doc.size && <span className="text-xs text-dim hidden sm:block">{doc.size}</span>}
-                  <a href={doc.url} target="_blank" rel="noopener noreferrer"
-                    className="text-gold hover:text-gold/70 transition-colors">
+                  <span className="text-gold group-hover:text-gold/70 transition-colors">
                     <Icon name="ExternalLink" size={14} />
-                  </a>
+                  </span>
                 </div>
-              </div>
+              </a>
             ))}
           </div>
-          <p className="text-xs text-dim">Источник: e-disclosure.ru · Нажмите на ссылку для открытия документа</p>
+          <p className="text-xs text-dim">Источник: Московская биржа + e-disclosure.ru · Нажмите для открытия</p>
         </div>
       )}
 
