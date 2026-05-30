@@ -61,7 +61,7 @@ interface HistoryEntry {
 
 const CURRENT_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: CURRENT_YEAR - 1990 + 1 }, (_, i) => String(CURRENT_YEAR - i));
-const PERIODS = ["Годовой отчёт", "1 квартал", "6 месяцев (1П)", "9 месяцев (3К)", "1П + 9 месяцев"];
+const PERIODS = ["Годовой отчёт", "1 квартал", "6 месяцев (1П)", "9 месяцев (3К)"];
 
 const DEFAULT_METRICS_LIST = `Выручка
 Операционная прибыль (EBIT)
