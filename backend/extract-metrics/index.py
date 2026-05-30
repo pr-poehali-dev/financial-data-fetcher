@@ -1,14 +1,14 @@
 """
 Загрузка документа (PDF или XLSX) по URL и извлечение финансовых показателей.
-Поддерживает: PDF (текстовый), XLSX/XLS.
+PDF парсится через pdfminer.six — точное извлечение текста с сохранением структуры страниц.
+XLSX парсится через openpyxl — читаем ячейки с сохранением связи «метка строки — значение».
 """
 import json
-import os
 import re
 import io
+import http.cookiejar
 import urllib.request
-import urllib.parse
-import base64
+import urllib.error
 
 
 CORS_HEADERS = {
@@ -33,65 +33,52 @@ def handler(event: dict, context) -> dict:
         body = {}
 
     doc_url = body.get("url", "").strip()
-    metrics = body.get("metrics", [])
-    company = body.get("company", "")
-    year = body.get("year", "")
+    metrics  = body.get("metrics", [])
+    company  = body.get("company", "")
+    year     = body.get("year", "")
 
     if not doc_url:
-        return {
-            "statusCode": 400,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"error": "URL документа обязателен"}, ensure_ascii=False),
-        }
-
+        return _err(400, "URL документа обязателен")
     if not metrics:
-        return {
-            "statusCode": 400,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"error": "Список показателей пуст"}, ensure_ascii=False),
-        }
+        return _err(400, "Список показателей пуст")
 
-    metrics = metrics[:20]
+    metrics = [str(m).strip() for m in metrics[:20] if str(m).strip()]
 
-    # Определяем тип файла
-    url_lower = doc_url.lower().split("?")[0]
-    if url_lower.endswith(".xlsx") or url_lower.endswith(".xls"):
+    # Тип файла по расширению в URL
+    url_clean = doc_url.lower().split("?")[0]
+    if url_clean.endswith((".xlsx", ".xls")):
         file_type = "xlsx"
-    elif url_lower.endswith(".zip") or url_lower.endswith(".rar"):
+    elif url_clean.endswith((".zip", ".rar")):
         file_type = "archive"
     else:
         file_type = "pdf"
 
-    # Скачиваем файл
     file_data, error = _download_file(doc_url)
     if error:
-        return {
-            "statusCode": 422,
-            "headers": CORS_HEADERS,
-            "body": json.dumps({"error": error}, ensure_ascii=False),
-        }
+        return _err(422, error)
 
-    # Извлекаем текст
+    # Извлекаем структурированный текст
     if file_type == "xlsx":
-        text = _extract_text_xlsx(file_data)
+        pages = _extract_xlsx(file_data)
     elif file_type == "pdf":
-        text = _extract_text_pdf(file_data)
+        pages = _extract_pdf(file_data)
     else:
-        text = ""
+        pages = []
 
-    if not text:
+    if not pages:
         return {
             "statusCode": 200,
             "headers": CORS_HEADERS,
             "body": json.dumps({
                 "metrics": [],
                 "raw_text_length": 0,
-                "warning": "Не удалось извлечь текст из документа. Возможно, PDF является сканом.",
+                "warning": "Не удалось извлечь текст. Возможно, PDF является сканом без текстового слоя.",
+                "file_type": file_type,
             }, ensure_ascii=False),
         }
 
-    # Ищем показатели в тексте
-    results = _find_metrics_in_text(text, metrics, year)
+    full_text = "\n".join(pages)
+    results = _find_metrics(full_text, pages, metrics, year)
 
     return {
         "statusCode": 200,
@@ -101,33 +88,35 @@ def handler(event: dict, context) -> dict:
             "year": year,
             "doc_url": doc_url,
             "file_type": file_type,
-            "raw_text_length": len(text),
+            "raw_text_length": len(full_text),
+            "pages": len(pages),
             "metrics": results,
         }, ensure_ascii=False),
     }
 
 
+# ─── Скачивание ────────────────────────────────────────────────────────────────
+
 def _download_file(url: str):
-    """Скачивает файл по URL с поддержкой редиректов. Возвращает (bytes, error_string)."""
-    import http.cookiejar
+    """Скачивает файл по URL с поддержкой редиректов и куки."""
     opener = urllib.request.build_opener(
         urllib.request.HTTPRedirectHandler(),
         urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
     )
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/pdf,application/octet-stream,*/*",
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-            "Referer": "https://www.e-disclosure.ru/",
-        }
-    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf,application/octet-stream,*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Referer": "https://www.e-disclosure.ru/",
+    })
     try:
         with opener.open(req, timeout=25) as resp:
-            size = int(resp.headers.get("Content-Length") or 0)
-            if size > MAX_FILE_SIZE:
-                return None, f"Файл слишком большой ({size // 1024 // 1024} МБ > 20 МБ)"
+            cl = int(resp.headers.get("Content-Length") or 0)
+            if cl > MAX_FILE_SIZE:
+                return None, f"Файл слишком большой ({cl // 1024 // 1024} МБ > 20 МБ)"
             data = resp.read(MAX_FILE_SIZE + 1)
             if len(data) > MAX_FILE_SIZE:
                 return None, "Файл превышает лимит 20 МБ"
@@ -138,187 +127,226 @@ def _download_file(url: str):
         return None, f"Ошибка загрузки: {str(e)}"
 
 
-def _extract_text_pdf(data: bytes) -> str:
-    """Извлечение текста из PDF без сторонних библиотек (базовый парсер)."""
+# ─── PDF через pdfminer.six ────────────────────────────────────────────────────
+
+def _extract_pdf(data: bytes) -> list:
+    """
+    Извлекает текст постранично через pdfminer.six.
+    Возвращает список строк (одна строка = одна страница PDF).
+    """
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTTextContainer, LTAnno, LTChar, LTTextLine
+
+    pages_text = []
     try:
-        # Пробуем через встроенные средства — ищем потоки текста в PDF
-        text_parts = []
-        content = data.decode("latin-1", errors="replace")
+        for page_layout in extract_pages(io.BytesIO(data)):
+            page_lines = []
+            for element in page_layout:
+                if isinstance(element, LTTextContainer):
+                    for text_line in element:
+                        if isinstance(text_line, LTTextLine):
+                            line_text = text_line.get_text().strip()
+                            if line_text:
+                                page_lines.append(line_text)
+            if page_lines:
+                pages_text.append("\n".join(page_lines))
+    except Exception as e:
+        # Фоллбэк: попробуем extract_text целиком
+        try:
+            from pdfminer.high_level import extract_text
+            text = extract_text(io.BytesIO(data))
+            if text and text.strip():
+                # Делим на страницы по символу \x0c (form feed)
+                pages_text = [p.strip() for p in text.split("\x0c") if p.strip()]
+        except Exception:
+            pass
 
-        # Извлекаем содержимое BT...ET блоков
-        bt_et = re.findall(r'BT(.*?)ET', content, re.DOTALL)
-        for block in bt_et:
-            # Ищем строки в скобках (PDF text strings)
-            strings = re.findall(r'\(([^)]{1,300})\)', block)
-            for s in strings:
-                cleaned = _clean_pdf_string(s)
-                if cleaned:
-                    text_parts.append(cleaned)
-
-        # Также ищем Unicode-строки
-        unicode_strings = re.findall(r'<([0-9A-Fa-f]{4,})>', content)
-        for hex_str in unicode_strings[:500]:
-            try:
-                if len(hex_str) % 4 == 0:
-                    chars = [chr(int(hex_str[i:i+4], 16)) for i in range(0, len(hex_str), 4)]
-                    decoded = "".join(chars)
-                    if any(c.isalpha() for c in decoded):
-                        text_parts.append(decoded)
-            except Exception:
-                pass
-
-        return " ".join(text_parts)
-    except Exception:
-        return ""
+    return pages_text
 
 
-def _clean_pdf_string(s: str) -> str:
-    """Очистка PDF строки от служебных символов."""
-    s = s.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
-    s = re.sub(r'\\[0-9]{3}', ' ', s)
-    s = re.sub(r'\\(.)', r'\1', s)
-    s = re.sub(r'[^\x20-\x7E\u0400-\u04FF\u0020]', ' ', s)
-    s = re.sub(r'\s+', ' ', s).strip()
-    return s if len(s) > 1 else ""
+# ─── XLSX через openpyxl ───────────────────────────────────────────────────────
 
+def _extract_xlsx(data: bytes) -> list:
+    """
+    Читает XLSX через openpyxl.
+    Возвращает список «страниц» (листов), каждый лист — строки вида «метка\tзначение».
+    Сохраняем пространственную связь: текст в левой ячейке строки + число в правой.
+    """
+    import openpyxl
 
-def _extract_text_xlsx(data: bytes) -> str:
-    """Извлечение текста из XLSX (ZIP с XML внутри)."""
-    import zipfile
-    text_parts = []
+    pages = []
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            # Читаем shared strings
-            shared_strings = []
-            if "xl/sharedStrings.xml" in zf.namelist():
-                ss_xml = zf.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
-                shared_strings = re.findall(r'<t[^>]*>([^<]+)</t>', ss_xml)
-
-            # Читаем листы
-            sheets = [n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")]
-            for sheet_name in sheets[:5]:
-                sheet_xml = zf.read(sheet_name).decode("utf-8", errors="replace")
-                # Ячейки с индексами на shared strings
-                cells_s = re.findall(r'<c[^>]+t="s"[^>]*><v>(\d+)</v>', sheet_xml)
-                for idx in cells_s:
-                    i = int(idx)
-                    if i < len(shared_strings):
-                        text_parts.append(shared_strings[i])
-                # Inline строки
-                inline = re.findall(r'<is><t>([^<]+)</t></is>', sheet_xml)
-                text_parts.extend(inline)
-                # Числовые значения
-                nums = re.findall(r'<v>(\d[\d\s,\.]+)</v>', sheet_xml)
-                text_parts.extend(nums[:2000])
-
-        return " | ".join(text_parts)
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        for sheet in wb.worksheets[:8]:
+            rows_text = []
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(c).strip() if c is not None else "" for c in row]
+                # Убираем полностью пустые строки
+                non_empty = [c for c in cells if c and c != "None"]
+                if not non_empty:
+                    continue
+                rows_text.append("\t".join(cells))
+            if rows_text:
+                pages.append("\n".join(rows_text))
+        wb.close()
     except Exception:
-        return ""
+        pass
+
+    return pages
 
 
-def _find_metrics_in_text(text: str, metrics: list, year: str) -> list:
-    """Поиск каждого показателя в тексте документа."""
+# ─── Поиск показателей ─────────────────────────────────────────────────────────
+
+def _find_metrics(full_text: str, pages: list, metrics: list, year: str) -> list:
+    """Ищет каждый показатель в тексте, возвращает список результатов."""
     results = []
-    text_lower = text.lower()
-    lines = text.split("\n") if "\n" in text else text.split("|")
+    full_lower = full_text.lower()
 
     for metric in metrics:
-        metric_lower = metric.lower().strip()
-        value, unit, found_context = _search_metric_value(text, text_lower, lines, metric_lower, year)
+        value, unit, context = _search_one(full_text, full_lower, metric, year)
         results.append({
             "name": metric,
             "value": value,
             "unit": unit,
             "period": year,
-            "source": "Документ",
-            "context": found_context[:200] if found_context else "",
+            "source": "Документ" if value else "Не найдено",
+            "context": context[:250] if context else "",
             "found": bool(value),
         })
 
     return results
 
 
-def _search_metric_value(text: str, text_lower: str, lines: list, metric_lower: str, year: str):
-    """Поиск значения показателя в тексте."""
+def _search_one(text: str, text_lower: str, metric: str, year: str):
+    """
+    Ищет значение одного показателя.
+    Стратегия:
+      1. Ищем строку содержащую название (или синоним) показателя
+      2. В этой строке и следующих 3 строках ищем число
+      3. Определяем единицу измерения из контекста
+    """
+    metric_lower = metric.lower().strip()
+    all_terms = [metric_lower] + _synonyms(metric_lower)
 
-    # Синонимы и аббревиатуры
-    synonyms = _get_synonyms(metric_lower)
-    all_terms = [metric_lower] + synonyms
+    lines = text.split("\n")
+    lines_lower = text_lower.split("\n")
 
     for term in all_terms:
-        # Ищем строку содержащую термин
+        for i, line_l in enumerate(lines_lower):
+            if term not in line_l:
+                continue
+
+            # Окно: текущая строка + 3 следующих
+            window_lines = lines[i: i + 4]
+            window = "\n".join(window_lines)
+            window_lower = window.lower()
+
+            value = _extract_number(window)
+            if value:
+                unit = _detect_unit(window_lower, text_lower)
+                context = window.strip()
+                return value, unit, context
+
+    # Фоллбэк: ищем в сплошном тексте по позиции
+    for term in all_terms:
         idx = text_lower.find(term)
         if idx == -1:
             continue
-
-        # Берём контекст вокруг найденного места
-        start = max(0, idx - 50)
-        end = min(len(text), idx + 300)
-        context = text[start:end]
-
-        # Ищем числа в контексте
-        # Форматы: 1 234 567, 1,234,567, 1234567, 27.4, 1.8
-        number_patterns = [
-            r'(\d{1,3}(?:[\s\u00a0]\d{3})+(?:[,\.]\d+)?)',  # 1 234 567
-            r'(\d{1,3}(?:,\d{3})+(?:\.\d+)?)',               # 1,234,567
-            r'(\d+[,\.]\d+)',                                  # 27.4 или 27,4
-            r'(\d{4,})',                                       # просто большое число
-        ]
-
-        for pat in number_patterns:
-            nums = re.findall(pat, context)
-            if nums:
-                raw = nums[0].strip()
-                # Нормализуем: пробелы-разделители тысяч убираем
-                normalized = re.sub(r'[\s\u00a0]', '', raw)
-                unit = _detect_unit(context)
-                return normalized, unit, context.strip()
+        context_raw = text[max(0, idx - 30): idx + 300]
+        value = _extract_number(context_raw)
+        if value:
+            unit = _detect_unit(context_raw.lower(), text_lower)
+            return value, unit, context_raw.strip()
 
     return "", "", ""
 
 
-def _detect_unit(context: str) -> str:
-    """Определение единицы измерения из контекста."""
-    ctx_lower = context.lower()
-    if "млрд" in ctx_lower or "billion" in ctx_lower:
-        return "млрд руб."
-    if "млн" in ctx_lower or "million" in ctx_lower or "тыс." in ctx_lower:
-        return "млн руб."
-    if "%" in ctx_lower or "процент" in ctx_lower:
-        return "%"
-    if "чел." in ctx_lower or "сотрудник" in ctx_lower or "работник" in ctx_lower:
-        return "чел."
-    if "тонн" in ctx_lower:
-        return "тонн"
-    if "руб." in ctx_lower or "рублей" in ctx_lower:
-        return "руб."
+def _extract_number(text: str) -> str:
+    """
+    Извлекает первое «финансовое» число из текста.
+    Порядок приоритета: большие числа с разделителями → дробные → целые.
+    """
+    patterns = [
+        r'(-?\d{1,3}(?:[\s\u00a0]\d{3})+(?:[,\.]\d+)?)',  # 1 234 567 или 1 234 567,8
+        r'(-?\d{1,3}(?:[,]\d{3})+(?:\.\d+)?)',              # 1,234,567.8
+        r'(-?\d+[,\.]\d+)',                                   # 27,4 или 27.4
+        r'(-?\d{4,})',                                        # любое число ≥ 4 цифр
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            raw = m.group(1).strip()
+            # Убираем лишние пробелы-разделители тысяч
+            normalized = re.sub(r'[\s\u00a0](?=\d{3})', '', raw)
+            return normalized
+    return ""
+
+
+def _detect_unit(context_lower: str, full_lower: str = "") -> str:
+    """Определяет единицу измерения из ближайшего контекста."""
+    checks = [
+        (["млрд руб", "billion rub", "млрд. руб"],      "млрд руб."),
+        (["млн руб", "million rub", "тыс. руб", "млн."], "млн руб."),
+        ([" % ", "процент", "percent", "margin"],        "%"),
+        (["чел.", "человек", "сотрудник", "работник", "employee", "headcount"], "чел."),
+        (["тонн", "тыс. тонн", "млн тонн", "баррел"],   "тонн"),
+        (["долл", "usd", "$"],                            "USD"),
+        (["евро", "eur", "€"],                            "EUR"),
+        (["млн", "million"],                              "млн руб."),
+        (["млрд", "billion"],                             "млрд руб."),
+        (["руб.", "рублей", "rub"],                       "руб."),
+        ([" x ", "раз"],                                  "x"),
+    ]
+    for keywords, unit in checks:
+        if any(kw in context_lower for kw in keywords):
+            return unit
+    # Ищем единицу в шапке документа
+    for keywords, unit in checks:
+        if full_lower and any(kw in full_lower[:2000] for kw in keywords):
+            return unit
     return "руб."
 
 
-def _get_synonyms(term: str) -> list:
-    """Словарь синонимов финансовых показателей."""
-    synonyms_map = {
-        "выручка": ["revenue", "revenues", "net revenue", "total revenue", "продажи", "объём продаж"],
-        "ebitda": ["ebitda", "ebit da", "прибыль до вычета"],
-        "ebit": ["operating profit", "операционная прибыль", "прибыль от операционной деятельности"],
-        "чистая прибыль": ["net income", "net profit", "profit for the year", "прибыль за период"],
-        "активы": ["total assets", "совокупные активы", "итого активы"],
-        "капитал": ["equity", "shareholders equity", "собственный капитал", "капитал акционеров"],
-        "долг": ["debt", "borrowings", "long-term debt", "долгосрочный долг", "кредиты и займы"],
-        "capex": ["capital expenditure", "капитальные затраты", "приобретение основных средств"],
-        "денежный поток": ["cash flow", "operating cash flow", "операционный денежный поток"],
-        "сотрудники": ["employees", "headcount", "численность", "персонал", "работников"],
-        "дивиденды": ["dividends", "дивиденды на акцию"],
-        "рентабельность": ["margin", "profitability", "доходность"],
+def _synonyms(term: str) -> list:
+    """Словарь синонимов и английских эквивалентов финансовых показателей."""
+    MAP = {
+        "выручка":                    ["revenue", "revenues", "net revenue", "total revenue", "net sales", "продажи"],
+        "ebitda":                     ["ebitda", "ebidta", "прибыль до вычета процентов"],
+        "ebit":                       ["ebit", "operating profit", "operating income", "операционная прибыль", "прибыль от операций"],
+        "операционная прибыль":       ["operating profit", "operating income", "ebit", "прибыль от операционной деятельности"],
+        "чистая прибыль":             ["net income", "net profit", "net earnings", "profit for the year", "profit for the period", "прибыль за период", "прибыль за год"],
+        "валовая прибыль":            ["gross profit", "gross margin"],
+        "совокупные активы":          ["total assets", "assets", "итого активы", "активы всего"],
+        "собственный капитал":        ["equity", "shareholders equity", "shareholders' equity", "total equity", "капитал акционеров", "итого капитал"],
+        "долгосрочный долг":          ["long-term debt", "long term borrowings", "non-current borrowings", "долгосрочные займы", "долгосрочные кредиты"],
+        "краткосрочный долг":         ["short-term debt", "current borrowings", "краткосрочные займы"],
+        "чистый долг":                ["net debt", "чистая задолженность"],
+        "капитальные затраты":        ["capex", "capital expenditure", "capital expenditures", "purchases of property", "приобретение основных средств", "капитальные вложения"],
+        "capex":                      ["capital expenditure", "capital expenditures", "capex", "капитальные затраты", "капитальные вложения"],
+        "операционный денежный поток":["operating cash flow", "cash from operations", "net cash from operating", "денежные средства от операционной деятельности"],
+        "свободный денежный поток":   ["free cash flow", "fcf"],
+        "рентабельность":             ["margin", "profitability", "return"],
+        "долг ebitda":                ["net debt/ebitda", "debt/ebitda", "leverage"],
+        "чистый долг ebitda":         ["net debt/ebitda", "net debt to ebitda"],
+        "дивиденды":                  ["dividends", "dividend", "дивиденды на акцию", "dps"],
+        "численность":                ["employees", "headcount", "number of employees", "staff", "персонал", "сотрудников", "работников"],
+        "добыча":                     ["production", "output", "объём добычи"],
     }
 
     result = []
-    for key, vals in synonyms_map.items():
-        if key in term or term in key:
+    for key, vals in MAP.items():
+        if key in term or term in key or any(v in term or term in v for v in vals):
             result.extend(vals)
-        for v in vals:
-            if v in term or term in v:
-                result.extend(vals)
-                break
+            result.append(key)
 
-    return list(set(result))
+    return list(dict.fromkeys(result))  # дедупликация с сохранением порядка
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _err(status: int, msg: str) -> dict:
+    return {
+        "statusCode": status,
+        "headers": CORS_HEADERS,
+        "body": json.dumps({"error": msg}, ensure_ascii=False),
+    }
