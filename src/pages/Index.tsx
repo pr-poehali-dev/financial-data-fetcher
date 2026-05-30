@@ -349,16 +349,21 @@ function MetricsSection({ result, onExtract }: {
   const [progress, setProgress] = useState("");
   const lineCount = metricsList.split("\n").filter(l => l.trim()).length;
 
+  // Только реальные файлы (не LINK)
+  const fileDocs = result?.documents?.filter(d => d.type !== "LINK") ?? [];
+
   useEffect(() => {
-    if (result?.documents?.length) {
-      // По умолчанию выбираем первый PDF или XLSX
-      const preferred = result.documents.find(d => d.type === "PDF" || d.type === "XLSX") || result.documents[0];
+    if (fileDocs.length) {
+      const preferred = fileDocs.find(d => d.type === "PDF" || d.type === "XLSX") || fileDocs[0];
       setSelectedDocUrl(preferred?.url || "");
+    } else {
+      setSelectedDocUrl("");
     }
   }, [result]);
 
   const handleExtract = async () => {
-    if (!selectedDocUrl) { setError("Выберите документ для извлечения данных"); return; }
+    if (!selectedDocUrl.trim()) { setError("Укажите ссылку на документ (PDF или XLSX)"); return; }
+    if (!selectedDocUrl.startsWith("http")) { setError("Ссылка должна начинаться с https://"); return; }
     const metrics = metricsList.split("\n").map(l => l.trim()).filter(Boolean).slice(0, 20);
     if (!metrics.length) return;
 
@@ -442,16 +447,15 @@ function MetricsSection({ result, onExtract }: {
         </div>
       </div>
 
-      {result.documents.length > 0 && (
+      {/* Реальные файлы из MOEX */}
+      {fileDocs.length > 0 && (
         <div className="space-y-2">
-          <label className="text-xs text-dim font-medium uppercase tracking-wider">Документ для извлечения</label>
+          <label className="text-xs text-dim font-medium uppercase tracking-wider">Выберите документ</label>
           <div className="space-y-2">
-            {result.documents.map((doc, i) => (
+            {fileDocs.map((doc, i) => (
               <label key={i}
                 className={`flex items-center gap-3 px-3 py-2.5 rounded border cursor-pointer transition-all ${
-                  selectedDocUrl === doc.url
-                    ? "border-gold bg-gold/5"
-                    : "border-surface-3 hover:border-muted-foreground"
+                  selectedDocUrl === doc.url ? "border-gold bg-gold/5" : "border-surface-3 hover:border-muted-foreground"
                 }`}>
                 <input type="radio" name="doc" value={doc.url} checked={selectedDocUrl === doc.url}
                   onChange={() => setSelectedDocUrl(doc.url)} className="accent-gold" />
@@ -466,6 +470,43 @@ function MetricsSection({ result, onExtract }: {
           </div>
         </div>
       )}
+
+      {/* Ручной ввод URL — всегда доступен */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <label className="text-xs text-dim font-medium uppercase tracking-wider">
+            {fileDocs.length > 0 ? "Или вставьте свою ссылку на PDF / XLSX" : "Ссылка на документ (PDF или XLSX)"}
+          </label>
+          {result.documents.find(d => d.type === "LINK") && (
+            <a
+              href={result.documents.find(d => d.type === "LINK")!.url}
+              target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs text-gold hover:text-gold/70 transition-colors"
+            >
+              <Icon name="ExternalLink" size={12} />
+              Открыть e-disclosure
+            </a>
+          )}
+        </div>
+        <input
+          type="url"
+          value={fileDocs.length === 0 || !fileDocs.find(d => d.url === selectedDocUrl) ? selectedDocUrl : ""}
+          onChange={e => setSelectedDocUrl(e.target.value.trim())}
+          placeholder="https://www.e-disclosure.ru/.../report.pdf"
+          className="w-full bg-surface-2 border border-surface-3 rounded text-sm px-3 py-2.5 text-foreground placeholder:text-dim focus:outline-none focus:border-gold transition-colors font-mono"
+        />
+        {fileDocs.length === 0 && (
+          <div className="bg-surface-2 border border-surface-3 rounded px-4 py-3 space-y-1.5">
+            <p className="text-xs font-medium text-foreground/70">Как найти ссылку на PDF:</p>
+            <ol className="text-xs text-dim space-y-1 list-none">
+              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">01</span>Откройте e-disclosure.ru по кнопке выше</li>
+              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">02</span>Найдите раздел «Финансовая отчётность» → «МСФО» или «Годовой отчёт»</li>
+              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">03</span>Правой кнопкой на ссылку PDF → «Копировать адрес ссылки»</li>
+              <li className="flex gap-2"><span className="text-gold font-mono shrink-0">04</span>Вставьте URL в поле выше и нажмите «Извлечь показатели»</li>
+            </ol>
+          </div>
+        )}
+      </div>
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
