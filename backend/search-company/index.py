@@ -114,12 +114,19 @@ def _search_moex(query: str) -> list:
             continue
         seen_inns.add(key)
 
+        # emitent_id из MOEX совпадает с id на e-disclosure (company.aspx?id=...)
+        edisclosure_url = (
+            f"{EDISCLOSURE_BASE}/portal/company.aspx?id={emitent_id}"
+            if emitent_id else
+            f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={emitent_inn}&onlyMatches=1"
+        )
+
         companies.append({
             "id":     str(emitent_id or ""),
             "name":   emitent_name.strip(),
             "inn":    emitent_inn,
             "ticker": secid,
-            "url":    f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={emitent_inn}&onlyMatches=1",
+            "url":    edisclosure_url,
             "source": "moex",
         })
         if len(companies) >= 8:
@@ -129,16 +136,24 @@ def _search_moex(query: str) -> list:
 
 
 def _find_documents(company: dict, year: str) -> list:
-    """Возвращает документы из статического словаря + ссылку на e-disclosure."""
-    inn  = company.get("inn", "")
+    """Возвращает документы из статического словаря + прямую ссылку на страницу компании."""
+    inn        = company.get("inn", "")
+    company_id = company.get("id", "")
     docs = _known_files(inn, year)
+
+    # Прямая ссылка на страницу компании — отсюда пользователь берёт FileId
+    page_url = (
+        f"{EDISCLOSURE_BASE}/portal/company.aspx?id={company_id}"
+        if company_id else
+        f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1"
+    )
     docs.append({
-        "name":        "Открыть страницу компании на e-disclosure.ru",
+        "name":        "Страница компании на e-disclosure.ru → найти FileId",
         "type":        "LINK",
-        "url":         f"{EDISCLOSURE_BASE}/poisk-po-kompaniyam?innNumber={inn}&onlyMatches=1",
+        "url":         page_url,
         "source":      "e-disclosure.ru",
         "size":        "",
-        "description": f"Все документы ИНН {inn}",
+        "description": "Наведите на ссылку PDF → скопируйте число из FileId=…",
     })
     return docs
 

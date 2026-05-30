@@ -320,19 +320,7 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
         </div>
       )}
 
-      {!searching && docs.length === 0 && !error && (
-        <div className="bg-surface-2 border border-surface-3 rounded px-4 py-4 space-y-2">
-          <p className="text-xs text-dim font-medium uppercase tracking-wider">Популярные компании</p>
-          <div className="flex flex-wrap gap-2">
-            {["Газпром", "Лукойл", "Сбербанк", "Роснефть", "Норникель", "МТС", "Новатэк"].map(name => (
-              <button key={name} onClick={() => { setQuery(name); handleQuery(name); }}
-                className="text-xs px-2.5 py-1 bg-surface-3 text-dim hover:text-foreground rounded transition-colors">
-                {name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+
     </div>
   );
 }
