@@ -98,21 +98,24 @@ def handler(event: dict, context) -> dict:
         }
 
     opener = _make_opener()
+    debug = {}
 
     # Шаг 1: «прогреваем» сессию — заходим на главную, получаем куки
     try:
         _fetch(opener, BASE + "/", referer=BASE, timeout=8)
-    except Exception:
-        pass
+        debug["warmup"] = "ok"
+    except Exception as e:
+        debug["warmup"] = str(e)
 
     # Шаг 2: ищем компании
-    companies = _search_companies(opener, query)
+    companies, debug_search = _search_companies(opener, query)
+    debug["search"] = debug_search
 
     if not companies:
         return {
             "statusCode": 200,
             "headers": CORS_HEADERS,
-            "body": json.dumps({"companies": [], "documents": [], "query": query}, ensure_ascii=False),
+            "body": json.dumps({"companies": [], "documents": [], "query": query, "debug": debug}, ensure_ascii=False),
         }
 
     top = companies[0]
@@ -130,14 +133,12 @@ def handler(event: dict, context) -> dict:
     }
 
 
-def _search_companies(opener: urllib.request.OpenerDirector, query: str) -> list:
-    """Поиск через внутренний Ajax-endpoint e-disclosure.ru."""
+def _search_companies(opener: urllib.request.OpenerDirector, query: str):
+    """Поиск через внутренний Ajax-endpoint e-disclosure.ru. Возвращает (list, debug_dict)."""
+    dbg = {}
 
-    # Вариант 1: Ajax-автодополнение (используется на сайте)
-    ajax_url = (
-        f"{BASE}/Search/Autocomplete"
-        f"?term={urllib.parse.quote(query)}&searchType=1"
-    )
+    # Вариант 1: Ajax-автодополнение
+    ajax_url = f"{BASE}/Search/Autocomplete?term={urllib.parse.quote(query)}&searchType=1"
     try:
         req = urllib.request.Request(
             ajax_url,
@@ -156,11 +157,14 @@ def _search_companies(opener: urllib.request.OpenerDirector, query: str) -> list
             enc = resp.headers.get("Content-Encoding", "")
             if enc == "gzip":
                 raw = gzip.decompress(raw)
-            data = json.loads(raw.decode("utf-8", errors="replace"))
+            text = raw.decode("utf-8", errors="replace")
+            dbg["autocomplete_status"] = resp.status
+            dbg["autocomplete_snippet"] = text[:300]
+            data = json.loads(text)
             if isinstance(data, list) and data:
-                return [_normalize_autocomplete(c) for c in data[:8] if c]
-    except Exception:
-        pass
+                return [_normalize_autocomplete(c) for c in data[:8] if c], dbg
+    except Exception as e:
+        dbg["autocomplete_error"] = str(e)
 
     # Вариант 2: JSON-поиск
     for search_path in [
@@ -182,25 +186,36 @@ def _search_companies(opener: urllib.request.OpenerDirector, query: str) -> list
                 enc = resp.headers.get("Content-Encoding", "")
                 if enc == "gzip":
                     raw = gzip.decompress(raw)
-                data = json.loads(raw.decode("utf-8", errors="replace"))
+                text = raw.decode("utf-8", errors="replace")
+                dbg[f"json_{search_path[:40]}_status"] = resp.status
+                dbg[f"json_{search_path[:40]}_snippet"] = text[:300]
+                data = json.loads(text)
                 items = data.get("items") or data.get("companies") or data.get("results") or []
                 if items:
-                    return [_normalize_company(c) for c in items[:8] if c]
-        except Exception:
-            continue
+                    return [_normalize_company(c) for c in items[:8] if c], dbg
+        except Exception as e:
+            dbg[f"json_error_{search_path[:40]}"] = str(e)
 
-    # Вариант 3: HTML-скрапинг страницы поиска
-    return _search_html(opener, query)
+    # Вариант 3: HTML-скрапинг
+    result, html_dbg = _search_html(opener, query)
+    dbg["html"] = html_dbg
+    return result, dbg
 
 
-def _search_html(opener: urllib.request.OpenerDirector, query: str) -> list:
-    """Скрапинг HTML страницы поиска e-disclosure.ru."""
+def _search_html(opener: urllib.request.OpenerDirector, query: str):
+    """Скрапинг HTML страницы поиска e-disclosure.ru. Возвращает (list, debug_dict)."""
     url = f"{BASE}/poisk-po-kompaniyam?query={urllib.parse.quote(query)}"
+    dbg = {"url": url}
     try:
         html = _fetch(opener, url, referer=BASE + "/")
-        return _parse_companies_html(html)
-    except Exception:
-        return []
+        dbg["html_len"] = len(html)
+        dbg["html_snippet"] = html[:500]
+        companies = _parse_companies_html(html)
+        dbg["parsed_count"] = len(companies)
+        return companies, dbg
+    except Exception as e:
+        dbg["error"] = str(e)
+        return [], dbg
 
 
 def _parse_companies_html(html: str) -> list:
