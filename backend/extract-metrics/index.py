@@ -6,6 +6,7 @@ XLSX парсится через openpyxl — читаем ячейки с со�
 import json
 import re
 import io
+import zipfile
 import http.cookiejar
 import urllib.request
 import urllib.error
@@ -69,9 +70,23 @@ def handler(event: dict, context) -> dict:
     else:
         file_type = "pdf"
 
-    file_data, error = _download_file(doc_url)
+    file_data, content_type, error = _download_file(doc_url)
     if error:
         return _err(422, error)
+
+    # Уточняем тип по сигнатуре байт (важно для FileLoad.ashx — без расширения в URL)
+    if file_type in ("pdf", "archive"):
+        if _is_xlsx_content(content_type, file_data):
+            file_type = "xlsx"
+        elif _is_archive_content(content_type, file_data):
+            file_type = "archive"
+
+    # Распаковываем архив — ищем самый большой PDF/XLSX внутри
+    archive_contents = []
+    if file_type == "archive":
+        file_data, file_type, archive_contents, error = _extract_from_archive(file_data)
+        if error:
+            return _err(422, error)
 
     # Извлекаем структурированный текст
     if file_type == "xlsx":
@@ -88,6 +103,7 @@ def handler(event: dict, context) -> dict:
             "body": json.dumps({
                 "metrics": [],
                 "raw_text_length": 0,
+                "archive_contents": archive_contents,
                 "warning": "Не удалось извлечь текст. Возможно, PDF является сканом без текстового слоя.",
                 "file_type": file_type,
             }, ensure_ascii=False),
@@ -104,6 +120,7 @@ def handler(event: dict, context) -> dict:
             "year": year,
             "doc_url": doc_url,
             "file_type": file_type,
+            "archive_contents": archive_contents,
             "raw_text_length": len(full_text),
             "pages": len(pages),
             "metrics": results,
@@ -132,15 +149,95 @@ def _download_file(url: str):
         with opener.open(req, timeout=25) as resp:
             cl = int(resp.headers.get("Content-Length") or 0)
             if cl > MAX_FILE_SIZE:
-                return None, f"Файл слишком большой ({cl // 1024 // 1024} МБ > 20 МБ)"
+                return None, "", f"Файл слишком большой ({cl // 1024 // 1024} МБ > 20 МБ)"
             data = resp.read(MAX_FILE_SIZE + 1)
             if len(data) > MAX_FILE_SIZE:
-                return None, "Файл превышает лимит 20 МБ"
-            return data, None
+                return None, "", "Файл превышает лимит 20 МБ"
+            content_type = resp.headers.get("Content-Type", "")
+            return data, content_type, None
     except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}: не удалось скачать документ"
+        return None, "", f"HTTP {e.code}: не удалось скачать документ"
     except Exception as e:
-        return None, f"Ошибка загрузки: {str(e)}"
+        return None, "", f"Ошибка загрузки: {str(e)}"
+
+
+# ─── Определение типа по содержимому ──────────────────────────────────────────
+
+def _is_archive_content(content_type: str, data: bytes) -> bool:
+    """Проверяет по сигнатуре байт что файл является ZIP-архивом."""
+    ct = content_type.lower()
+    if "zip" in ct or "octet-stream" in ct:
+        pass
+    # ZIP magic: PK\x03\x04
+    if data[:4] == b'PK\x03\x04':
+        return True
+    # RAR magic: Rar!
+    if data[:4] == b'Rar!':
+        return True
+    return False
+
+
+def _is_xlsx_content(content_type: str, data: bytes) -> bool:
+    """XLSX тоже ZIP, но внутри xl/workbook.xml."""
+    if data[:4] != b'PK\x03\x04':
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = zf.namelist()
+            return any(n.startswith("xl/") for n in names)
+    except Exception:
+        return False
+
+
+# ─── Распаковка архива ─────────────────────────────────────────────────────────
+
+def _extract_from_archive(data: bytes):
+    """
+    Распаковывает ZIP-архив, находит лучший PDF или XLSX для анализа.
+    Выбирает самый большой PDF — обычно это и есть основной отчёт.
+    Возвращает (file_data, file_type, contents_list, error).
+    """
+    contents = []
+
+    # RAR не поддерживается встроенными средствами — сообщаем пользователю
+    if data[:4] == b'Rar!':
+        return None, None, [], "RAR-архивы не поддерживаются. Распакуйте архив и загрузите PDF напрямую."
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            all_files = zf.namelist()
+
+            # Собираем список файлов с размерами
+            for name in all_files:
+                info = zf.getinfo(name)
+                ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+                if ext in ("pdf", "xlsx", "xls") and not name.startswith("__MACOSX"):
+                    contents.append({
+                        "name": name.split("/")[-1],
+                        "path": name,
+                        "size_kb": round(info.file_size / 1024),
+                        "type": ext.upper(),
+                    })
+
+            if not contents:
+                return None, None, [], (
+                    "В архиве нет PDF или XLSX файлов. "
+                    f"Содержимое: {', '.join(all_files[:10])}"
+                )
+
+            # Сортируем: сначала PDF, потом по размеру (самый большой = основной отчёт)
+            contents.sort(key=lambda f: (f["type"] != "PDF", -f["size_kb"]))
+            best = contents[0]
+
+            file_bytes = zf.read(best["path"])
+            file_type = "pdf" if best["type"] == "PDF" else "xlsx"
+
+            return file_bytes, file_type, contents, None
+
+    except zipfile.BadZipFile:
+        return None, None, [], "Файл повреждён или не является ZIP-архивом."
+    except Exception as e:
+        return None, None, [], f"Ошибка при распаковке архива: {str(e)[:200]}"
 
 
 # ─── PDF через pdfminer.six ────────────────────────────────────────────────────

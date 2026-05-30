@@ -349,6 +349,7 @@ function MetricsSection({ result, onExtract }: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
+  const [archiveContents, setArchiveContents] = useState<{name: string; size_kb: number; type: string}[]>([]);
   const lineCount = metricsList.split("\n").filter(l => l.trim()).length;
 
   // Только реальные файлы (не LINK)
@@ -377,6 +378,7 @@ function MetricsSection({ result, onExtract }: {
 
     setLoading(true);
     setError("");
+    setArchiveContents([]);
     setProgress("Загружаю документ...");
 
     try {
@@ -401,6 +403,10 @@ function MetricsSection({ result, onExtract }: {
 
       if (data.warning) {
         setError(data.warning);
+      }
+
+      if (data.archive_contents?.length) {
+        setArchiveContents(data.archive_contents);
       }
 
       const rows: MetricRow[] = (data.metrics || []).map((m: MetricRow) => ({
@@ -578,6 +584,32 @@ function MetricsSection({ result, onExtract }: {
         <div className="flex items-start gap-3 bg-amber-400/5 border border-amber-400/20 rounded px-4 py-3">
           <Icon name="AlertTriangle" size={15} className="text-amber-400 mt-0.5 shrink-0" />
           <p className="text-sm text-amber-300">{error}</p>
+        </div>
+      )}
+
+      {/* Содержимое архива после распаковки */}
+      {archiveContents.length > 0 && (
+        <div className="animate-fade-in space-y-2">
+          <div className="flex items-center gap-2">
+            <Icon name="Archive" size={14} className="text-gold" />
+            <span className="text-xs text-dim uppercase tracking-wider">Файлы в архиве</span>
+          </div>
+          <div className="space-y-1">
+            {archiveContents.map((f, i) => (
+              <div key={i} className={`flex items-center justify-between px-3 py-2 rounded border text-xs ${
+                i === 0 ? "border-gold/40 bg-gold/5" : "border-surface-3 bg-surface-2"
+              }`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`font-mono px-1 py-0.5 rounded shrink-0 ${
+                    f.type === "PDF" ? "text-rose-400 bg-rose-400/10" : "text-emerald-400 bg-emerald-400/10"
+                  }`}>{f.type}</span>
+                  <span className="truncate text-foreground/80">{f.name}</span>
+                  {i === 0 && <span className="text-gold text-xs shrink-0">← используется</span>}
+                </div>
+                <span className="text-dim font-mono shrink-0 ml-2">{f.size_kb} КБ</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
