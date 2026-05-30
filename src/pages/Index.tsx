@@ -1,17 +1,40 @@
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── API URLs ──────────────────────────────────────────────────────────────────
+
+const API = {
+  searchCompany: "https://functions.poehali.dev/5e410c54-9c7f-4d75-8358-2fa7f2241336",
+  extractMetrics: "https://functions.poehali.dev/85428a9a-38cb-4114-ba2e-89091669ed2d",
+};
+
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
 type Step = "search" | "metrics" | "results" | "history" | "help";
 
+interface Company {
+  id: string;
+  name: string;
+  inn: string;
+  url: string;
+}
+
+interface Document {
+  name: string;
+  type: string;
+  url: string;
+  source: string;
+  size: string;
+}
+
 interface SearchResult {
   company: string;
+  companyId: string;
+  companyUrl: string;
   inn: string;
   period: string;
   year: string;
-  source: string;
-  docType: string;
+  documents: Document[];
 }
 
 interface MetricRow {
@@ -20,41 +43,21 @@ interface MetricRow {
   unit: string;
   period: string;
   source: string;
+  found: boolean;
+  context?: string;
 }
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
+interface HistoryEntry {
+  company: string;
+  period: string;
+  docs: number;
+  date: string;
+  metrics: number;
+  result: SearchResult;
+  rows: MetricRow[];
+}
 
-const MOCK_COMPANIES = [
-  { name: "ПАО Газпром", inn: "7736050003", ticker: "GAZP" },
-  { name: "ПАО Лукойл", inn: "7708004767", ticker: "LKOH" },
-  { name: "ПАО Сбербанк", inn: "7707083893", ticker: "SBER" },
-  { name: "ПАО Норильский никель", inn: "8401005730", ticker: "GMKN" },
-  { name: "ПАО Роснефть", inn: "7706107510", ticker: "ROSN" },
-  { name: "ПАО МТС", inn: "7740000076", ticker: "MTSS" },
-  { name: "ПАО Новатэк", inn: "8905000980", ticker: "NVTK" },
-  { name: "ПАО Магнит", inn: "2309085638", ticker: "MGNT" },
-];
-
-const MOCK_METRICS: MetricRow[] = [
-  { name: "Выручка", value: "8 541 964", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Операционная прибыль (EBIT)", value: "1 823 441", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "EBITDA", value: "2 341 872", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Чистая прибыль", value: "1 230 044", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Совокупные активы", value: "27 851 964", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Собственный капитал", value: "16 543 219", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Долгосрочный долг", value: "4 218 766", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Капитальные затраты (CAPEX)", value: "1 543 219", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Операционный денежный поток", value: "2 108 543", unit: "млн руб.", period: "2023", source: "МСФО Консолидированная" },
-  { name: "Рентабельность по EBITDA", value: "27,4", unit: "%", period: "2023", source: "Расчётный" },
-  { name: "Чистый долг / EBITDA", value: "1,8", unit: "x", period: "2023", source: "Расчётный" },
-  { name: "Численность сотрудников", value: "476 300", unit: "чел.", period: "2023", source: "Годовой отчёт" },
-];
-
-const HISTORY = [
-  { company: "ПАО Газпром", period: "2023 (годовой)", docs: 3, date: "28.05.2026", metrics: 12 },
-  { company: "ПАО Лукойл", period: "2022 (годовой)", docs: 2, date: "20.05.2026", metrics: 8 },
-  { company: "ПАО Сбербанк", period: "1П 2023", docs: 1, date: "12.05.2026", metrics: 15 },
-];
+// ─── Constants ─────────────────────────────────────────────────────────────────
 
 const YEARS = ["2024", "2023", "2022", "2021", "2020", "2019"];
 const PERIODS = ["Годовой отчёт", "1 квартал", "6 месяцев (1П)", "9 месяцев (3К)", "1П + 9 месяцев"];
@@ -72,7 +75,7 @@ EBITDA
 Чистый долг / EBITDA
 Численность сотрудников`;
 
-// ─── Subcomponents ────────────────────────────────────────────────────────────
+// ─── NavItem ───────────────────────────────────────────────────────────────────
 
 function NavItem({ id, label, icon, active, onClick }: {
   id: Step; label: string; icon: string; active: boolean; onClick: (s: Step) => void;
@@ -92,55 +95,98 @@ function NavItem({ id, label, icon, active, onClick }: {
   );
 }
 
-// ─── Search Section ───────────────────────────────────────────────────────────
+// ─── Search Section ────────────────────────────────────────────────────────────
 
 function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
   const [query, setQuery] = useState("");
-  const [filtered, setFiltered] = useState(MOCK_COMPANIES);
-  const [selected, setSelected] = useState<(typeof MOCK_COMPANIES)[0] | null>(null);
+  const [suggestions, setSuggestions] = useState<Company[]>([]);
+  const [selected, setSelected] = useState<Company | null>(null);
   const [year, setYear] = useState("2023");
   const [period, setPeriod] = useState("Годовой отчёт");
+  const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [searching, setSearching] = useState(false);
-  const [found, setFound] = useState(false);
-  const [docs, setDocs] = useState<{ name: string; type: string; size: string }[]>([]);
+  const [docs, setDocs] = useState<Document[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
+  const [error, setError] = useState("");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Debounced autocomplete
   const handleQuery = (v: string) => {
     setQuery(v);
-    setFound(false);
     setSelected(null);
-    if (v.length > 0) {
-      setFiltered(MOCK_COMPANIES.filter(c =>
-        c.name.toLowerCase().includes(v.toLowerCase()) ||
-        c.inn.includes(v) ||
-        c.ticker.toLowerCase().includes(v.toLowerCase())
-      ));
-      setShowDropdown(true);
-    } else {
-      setShowDropdown(false);
-    }
+    setDocs([]);
+    setError("");
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (v.length < 2) { setSuggestions([]); setShowDropdown(false); return; }
+    debounceRef.current = setTimeout(async () => {
+      setLoadingSuggest(true);
+      try {
+        const res = await fetch(`${API.searchCompany}?query=${encodeURIComponent(v)}&year=${year}`);
+        const data = await res.json();
+        const list: Company[] = data.companies || [];
+        setSuggestions(list);
+        setShowDropdown(list.length > 0);
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setLoadingSuggest(false);
+      }
+    }, 400);
   };
 
-  const selectCompany = (c: (typeof MOCK_COMPANIES)[0]) => {
+  const selectCompany = (c: Company) => {
     setSelected(c);
     setQuery(c.name);
     setShowDropdown(false);
   };
 
-  const handleSearch = () => {
-    if (!selected) return;
+  const handleSearch = async () => {
+    if (!selected && !query.trim()) return;
     setSearching(true);
-    setTimeout(() => {
+    setError("");
+    setDocs([]);
+    try {
+      const q = selected ? selected.name : query.trim();
+      const res = await fetch(`${API.searchCompany}?query=${encodeURIComponent(q)}&year=${year}&period=${encodeURIComponent(period)}`);
+      const data = await res.json();
+
+      const foundDocs: Document[] = data.documents || [];
+      const companies: Company[] = data.companies || [];
+      const top: Company = data.selected || companies[0] || selected || { id: "", name: q, inn: "", url: "" };
+
+      setDocs(foundDocs);
+      if (!selected && companies[0]) setSelected(companies[0]);
+
+      onFound({
+        company: top.name,
+        companyId: top.id,
+        companyUrl: top.url,
+        inn: top.inn,
+        period,
+        year,
+        documents: foundDocs,
+      });
+
+      if (foundDocs.length === 0) {
+        setError("Документы за выбранный период не найдены. Попробуйте другой год или период.");
+      }
+    } catch (e) {
+      setError("Ошибка соединения с сервером. Проверьте интернет и попробуйте снова.");
+    } finally {
       setSearching(false);
-      setFound(true);
-      setDocs([
-        { name: `${selected.ticker}_IFRS_${year}_Annual.pdf`, type: "PDF", size: "4.2 МБ" },
-        { name: `${selected.ticker}_Databook_${year}.xlsx`, type: "XLSX", size: "1.8 МБ" },
-        { name: `${selected.ticker}_Annual_Report_${year}.pdf`, type: "PDF", size: "12.1 МБ" },
-      ]);
-      onFound({ company: selected.name, inn: selected.inn, period, year, source: "e-disclosure.ru", docType: "МСФО + Годовой отчёт" });
-    }, 1800);
+    }
   };
+
+  // Закрыть дропдаун при клике вне
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (!(e.target as Element).closest(".search-dropdown-wrap")) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -152,27 +198,30 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-1">
           <label className="text-xs text-dim font-medium uppercase tracking-wider">Компания</label>
-          <div className="relative">
+          <div className="relative search-dropdown-wrap">
             <div className="absolute left-3 top-1/2 -translate-y-1/2 text-dim pointer-events-none">
-              <Icon name="Search" size={15} />
+              {loadingSuggest
+                ? <Icon name="Loader2" size={15} className="animate-spin" />
+                : <Icon name="Search" size={15} />}
             </div>
             <input
               type="text"
               value={query}
               onChange={e => handleQuery(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleSearch()}
               placeholder="Газпром, Лукойл, SBER, 7707083893..."
               className="w-full bg-surface-2 border border-surface-3 rounded text-sm pl-9 pr-3 py-2.5 text-foreground placeholder:text-dim focus:outline-none focus:border-gold transition-colors"
             />
-            {showDropdown && filtered.length > 0 && (
+            {showDropdown && suggestions.length > 0 && (
               <div className="absolute top-full mt-1 w-full bg-surface-1 border border-surface-3 rounded z-50 overflow-hidden shadow-2xl">
-                {filtered.map(c => (
-                  <button key={c.inn} onClick={() => selectCompany(c)}
+                {suggestions.map((c, i) => (
+                  <button key={c.id || i} onClick={() => selectCompany(c)}
                     className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-surface-2 text-left transition-colors">
                     <div>
                       <div className="text-sm font-medium text-foreground">{c.name}</div>
-                      <div className="text-xs text-dim">ИНН {c.inn}</div>
+                      {c.inn && <div className="text-xs text-dim">ИНН {c.inn}</div>}
                     </div>
-                    <span className="font-mono text-xs text-gold">{c.ticker}</span>
+                    <Icon name="ExternalLink" size={12} className="text-dim shrink-0" />
                   </button>
                 ))}
               </div>
@@ -203,20 +252,27 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
       </div>
 
       <div className="flex items-center gap-4">
-        <button onClick={handleSearch} disabled={!selected || searching}
+        <button onClick={handleSearch} disabled={(!selected && !query.trim()) || searching}
           className="flex items-center gap-2 px-5 py-2.5 bg-gold text-background font-semibold text-sm rounded hover:bg-gold/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-          {searching ? (
-            <><Icon name="Loader2" size={15} className="animate-spin" />Поиск документов...</>
-          ) : (
-            <><Icon name="FileSearch" size={15} />Найти отчётность</>
-          )}
+          {searching
+            ? <><Icon name="Loader2" size={15} className="animate-spin" />Поиск документов...</>
+            : <><Icon name="FileSearch" size={15} />Найти отчётность</>}
         </button>
-        {found && (
-          <span className="text-xs font-mono px-2 py-0.5 rounded text-emerald-400 bg-emerald-400/10">Найдено</span>
+        {!searching && docs.length > 0 && (
+          <span className="text-xs font-mono px-2 py-0.5 rounded text-emerald-400 bg-emerald-400/10">
+            Найдено {docs.length}
+          </span>
         )}
       </div>
 
-      {found && docs.length > 0 && (
+      {error && (
+        <div className="flex items-start gap-3 bg-rose-400/5 border border-rose-400/20 rounded px-4 py-3">
+          <Icon name="AlertCircle" size={15} className="text-rose-400 mt-0.5 shrink-0" />
+          <p className="text-sm text-rose-300">{error}</p>
+        </div>
+      )}
+
+      {docs.length > 0 && (
         <div className="animate-fade-in space-y-3">
           <div className="flex items-center gap-2">
             <div className="gold-line flex-1" />
@@ -226,15 +282,17 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
           <div className="space-y-2">
             {docs.map((doc, i) => (
               <div key={i} className="flex items-center justify-between bg-surface-2 border border-surface-3 rounded px-4 py-3 hover:border-gold/40 transition-colors">
-                <div className="flex items-center gap-3">
-                  <span className={`font-mono text-xs px-1.5 py-0.5 rounded ${
-                    doc.type === "PDF" ? "text-rose-400 bg-rose-400/10" : "text-emerald-400 bg-emerald-400/10"
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`font-mono text-xs px-1.5 py-0.5 rounded shrink-0 ${
+                    doc.type === "PDF" ? "text-rose-400 bg-rose-400/10"
+                    : doc.type === "ZIP" || doc.type === "RAR" ? "text-amber-400 bg-amber-400/10"
+                    : "text-emerald-400 bg-emerald-400/10"
                   }`}>{doc.type}</span>
-                  <span className="text-sm text-foreground">{doc.name}</span>
+                  <span className="text-sm text-foreground truncate">{doc.name}</span>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-dim">{doc.size}</span>
-                  <a href="https://www.e-disclosure.ru/" target="_blank" rel="noopener noreferrer"
+                <div className="flex items-center gap-3 shrink-0 ml-2">
+                  {doc.size && <span className="text-xs text-dim hidden sm:block">{doc.size}</span>}
+                  <a href={doc.url} target="_blank" rel="noopener noreferrer"
                     className="text-gold hover:text-gold/70 transition-colors">
                     <Icon name="ExternalLink" size={14} />
                   </a>
@@ -242,23 +300,98 @@ function SearchSection({ onFound }: { onFound: (r: SearchResult) => void }) {
               </div>
             ))}
           </div>
-          <p className="text-xs text-dim">Источник: e-disclosure.ru · Обновлено сегодня</p>
+          <p className="text-xs text-dim">Источник: e-disclosure.ru · Нажмите на ссылку для открытия документа</p>
+        </div>
+      )}
+
+      {!searching && docs.length === 0 && !error && (
+        <div className="bg-surface-2 border border-surface-3 rounded px-4 py-4 space-y-2">
+          <p className="text-xs text-dim font-medium uppercase tracking-wider">Популярные компании</p>
+          <div className="flex flex-wrap gap-2">
+            {["Газпром", "Лукойл", "Сбербанк", "Роснефть", "Норникель", "МТС", "Новатэк"].map(name => (
+              <button key={name} onClick={() => { setQuery(name); handleQuery(name); }}
+                className="text-xs px-2.5 py-1 bg-surface-3 text-dim hover:text-foreground rounded transition-colors">
+                {name}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-// ─── Metrics Section ──────────────────────────────────────────────────────────
+// ─── Metrics Section ───────────────────────────────────────────────────────────
 
-function MetricsSection({ result, onExtract }: { result: SearchResult | null; onExtract: () => void }) {
+function MetricsSection({ result, onExtract }: {
+  result: SearchResult | null;
+  onExtract: (rows: MetricRow[], docUrl: string) => void;
+}) {
   const [metricsList, setMetricsList] = useState(DEFAULT_METRICS_LIST);
+  const [selectedDocUrl, setSelectedDocUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [progress, setProgress] = useState("");
   const lineCount = metricsList.split("\n").filter(l => l.trim()).length;
 
-  const handleExtract = () => {
+  useEffect(() => {
+    if (result?.documents?.length) {
+      // По умолчанию выбираем первый PDF или XLSX
+      const preferred = result.documents.find(d => d.type === "PDF" || d.type === "XLSX") || result.documents[0];
+      setSelectedDocUrl(preferred?.url || "");
+    }
+  }, [result]);
+
+  const handleExtract = async () => {
+    if (!selectedDocUrl) { setError("Выберите документ для извлечения данных"); return; }
+    const metrics = metricsList.split("\n").map(l => l.trim()).filter(Boolean).slice(0, 20);
+    if (!metrics.length) return;
+
     setLoading(true);
-    setTimeout(() => { setLoading(false); onExtract(); }, 2000);
+    setError("");
+    setProgress("Загружаю документ...");
+
+    try {
+      setProgress("Парсинг документа...");
+      const res = await fetch(API.extractMetrics, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: selectedDocUrl,
+          metrics,
+          company: result?.company || "",
+          year: result?.year || "",
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || "Ошибка при извлечении данных");
+        return;
+      }
+
+      if (data.warning) {
+        setError(data.warning);
+      }
+
+      const rows: MetricRow[] = (data.metrics || []).map((m: MetricRow) => ({
+        name: m.name,
+        value: m.value || "—",
+        unit: m.unit || "",
+        period: result?.year || "",
+        source: m.found ? "Документ" : "Не найдено",
+        found: m.found,
+        context: m.context,
+      }));
+
+      onExtract(rows, selectedDocUrl);
+    } catch {
+      setError("Ошибка соединения. Проверьте интернет и попробуйте снова.");
+    } finally {
+      setLoading(false);
+      setProgress("");
+    }
   };
 
   if (!result) {
@@ -289,10 +422,35 @@ function MetricsSection({ result, onExtract }: { result: SearchResult | null; on
         </div>
         <div className="w-px bg-surface-3" />
         <div>
-          <div className="text-xs text-dim uppercase tracking-wider mb-0.5">Документ</div>
-          <div className="text-sm font-medium">{result.docType}</div>
+          <div className="text-xs text-dim uppercase tracking-wider mb-0.5">Документов</div>
+          <div className="text-sm font-medium">{result.documents.length}</div>
         </div>
       </div>
+
+      {result.documents.length > 0 && (
+        <div className="space-y-2">
+          <label className="text-xs text-dim font-medium uppercase tracking-wider">Документ для извлечения</label>
+          <div className="space-y-2">
+            {result.documents.map((doc, i) => (
+              <label key={i}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded border cursor-pointer transition-all ${
+                  selectedDocUrl === doc.url
+                    ? "border-gold bg-gold/5"
+                    : "border-surface-3 hover:border-muted-foreground"
+                }`}>
+                <input type="radio" name="doc" value={doc.url} checked={selectedDocUrl === doc.url}
+                  onChange={() => setSelectedDocUrl(doc.url)} className="accent-gold" />
+                <span className={`font-mono text-xs px-1.5 py-0.5 rounded shrink-0 ${
+                  doc.type === "PDF" ? "text-rose-400 bg-rose-400/10"
+                  : doc.type === "ZIP" ? "text-amber-400 bg-amber-400/10"
+                  : "text-emerald-400 bg-emerald-400/10"
+                }`}>{doc.type}</span>
+                <span className="text-sm truncate">{doc.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
@@ -302,41 +460,45 @@ function MetricsSection({ result, onExtract }: { result: SearchResult | null; on
         <textarea
           value={metricsList}
           onChange={e => setMetricsList(e.target.value)}
-          rows={14}
+          rows={12}
           placeholder={"Выручка\nEBITDA\nЧистая прибыль\n..."}
           className="w-full bg-surface-2 border border-surface-3 rounded text-sm px-4 py-3 text-foreground placeholder:text-dim focus:outline-none focus:border-gold transition-colors resize-none font-mono leading-relaxed"
         />
         <p className="text-xs text-dim">Поддерживаются финансовые и нефинансовые показатели, включая ESG-метрики</p>
       </div>
 
+      {error && (
+        <div className="flex items-start gap-3 bg-amber-400/5 border border-amber-400/20 rounded px-4 py-3">
+          <Icon name="AlertTriangle" size={15} className="text-amber-400 mt-0.5 shrink-0" />
+          <p className="text-sm text-amber-300">{error}</p>
+        </div>
+      )}
+
       <button onClick={handleExtract} disabled={lineCount === 0 || lineCount > 20 || loading}
         className="flex items-center gap-2 px-5 py-2.5 bg-gold text-background font-semibold text-sm rounded hover:bg-gold/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-        {loading ? (
-          <><Icon name="Loader2" size={15} className="animate-spin" />Извлекаю данные...</>
-        ) : (
-          <><Icon name="Zap" size={15} />Извлечь показатели</>
-        )}
+        {loading
+          ? <><Icon name="Loader2" size={15} className="animate-spin" />{progress || "Извлекаю данные..."}</>
+          : <><Icon name="Zap" size={15} />Извлечь показатели</>}
       </button>
     </div>
   );
 }
 
-// ─── Results Section ──────────────────────────────────────────────────────────
+// ─── Results Section ───────────────────────────────────────────────────────────
 
-function ResultsSection({ result }: { result: SearchResult | null }) {
+function ResultsSection({ result, rows }: { result: SearchResult | null; rows: MetricRow[] }) {
   const [copied, setCopied] = useState(false);
 
   const copyToClipboard = () => {
     const header = ["Показатель", "Значение", "Единица", "Период", "Источник"].join("\t");
-    const rows = MOCK_METRICS.map(r => [r.name, r.value, r.unit, r.period, r.source].join("\t"));
-    const tsv = [header, ...rows].join("\n");
-    navigator.clipboard.writeText(tsv).then(() => {
+    const data = rows.map(r => [r.name, r.value, r.unit, r.period, r.source].join("\t"));
+    navigator.clipboard.writeText([header, ...data].join("\n")).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
   };
 
-  if (!result) {
+  if (!result || !rows.length) {
     return (
       <div className="animate-fade-in flex flex-col items-center justify-center h-64 text-center">
         <Icon name="Table2" size={36} className="text-dim mb-3" />
@@ -344,6 +506,8 @@ function ResultsSection({ result }: { result: SearchResult | null }) {
       </div>
     );
   }
+
+  const foundCount = rows.filter(r => r.found).length;
 
   return (
     <div className="animate-fade-in space-y-4">
@@ -363,6 +527,15 @@ function ResultsSection({ result }: { result: SearchResult | null }) {
         </button>
       </div>
 
+      <div className="flex items-center gap-3 text-xs text-dim">
+        <span className="text-emerald-400">{foundCount} найдено</span>
+        <span>·</span>
+        <span>{rows.length - foundCount} не найдено</span>
+        {rows.length - foundCount > 0 && (
+          <span className="text-dim">— возможно, показатели названы иначе в документе</span>
+        )}
+      </div>
+
       <div className="rounded border border-surface-3 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -376,16 +549,20 @@ function ResultsSection({ result }: { result: SearchResult | null }) {
               </tr>
             </thead>
             <tbody>
-              {MOCK_METRICS.map((row, i) => (
+              {rows.map((row, i) => (
                 <tr key={i}
                   className={`border-b border-surface-3 last:border-0 transition-colors hover:bg-surface-2 ${
                     i % 2 === 0 ? "bg-transparent" : "bg-surface-1/50"
                   }`}>
                   <td className="px-4 py-2.5 font-medium text-foreground">{row.name}</td>
-                  <td className="px-4 py-2.5 text-right font-mono text-gold">{row.value}</td>
+                  <td className={`px-4 py-2.5 text-right font-mono ${row.found ? "text-gold" : "text-dim"}`}>
+                    {row.value}
+                  </td>
                   <td className="px-4 py-2.5 text-dim">{row.unit}</td>
                   <td className="px-4 py-2.5 text-dim font-mono">{row.period}</td>
-                  <td className="px-4 py-2.5 text-dim text-xs">{row.source}</td>
+                  <td className="px-4 py-2.5 text-xs">
+                    <span className={row.found ? "text-emerald-400" : "text-dim"}>{row.source}</span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -394,23 +571,55 @@ function ResultsSection({ result }: { result: SearchResult | null }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <button className="flex items-center gap-2 px-4 py-2 text-sm border border-surface-3 text-dim rounded hover:border-gold hover:text-gold transition-all">
+        <button
+          onClick={copyToClipboard}
+          className="flex items-center gap-2 px-4 py-2 text-sm border border-surface-3 text-dim rounded hover:border-gold hover:text-gold transition-all">
           <Icon name="Download" size={14} />
-          Скачать .xlsx
+          Копировать в Excel / Google Таблицы
         </button>
-        <button className="flex items-center gap-2 px-4 py-2 text-sm border border-surface-3 text-dim rounded hover:border-gold hover:text-gold transition-all">
-          <Icon name="FileText" size={14} />
-          Скачать .csv
-        </button>
-        <p className="text-xs text-dim ml-auto">* Данные демонстрационные. Подключите парсер для реальных значений.</p>
+        {result.companyUrl && (
+          <a href={result.companyUrl} target="_blank" rel="noopener noreferrer"
+            className="flex items-center gap-2 px-4 py-2 text-sm border border-surface-3 text-dim rounded hover:border-gold hover:text-gold transition-all">
+            <Icon name="ExternalLink" size={14} />
+            Страница компании
+          </a>
+        )}
+      </div>
+
+      <div className="bg-gold/5 border border-gold/20 rounded px-4 py-3">
+        <div className="flex items-start gap-2">
+          <Icon name="Info" size={14} className="text-gold mt-0.5 shrink-0" />
+          <p className="text-xs text-foreground/60">
+            Данные извлечены автоматически из текста документа. Рекомендуем сверить значения с оригиналом.
+            Если показатель не найден — попробуйте уточнить его название (например «Revenue» вместо «Выручка»).
+          </p>
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── History Section ──────────────────────────────────────────────────────────
+// ─── History Section ───────────────────────────────────────────────────────────
 
-function HistorySection() {
+function HistorySection({ history, onRestore }: {
+  history: HistoryEntry[];
+  onRestore: (e: HistoryEntry) => void;
+}) {
+  if (!history.length) {
+    return (
+      <div className="animate-fade-in space-y-6">
+        <div>
+          <h2 className="text-xl font-semibold mb-1">История поисков</h2>
+          <p className="text-sm text-dim">Ранее загруженные отчёты и извлечённые данные</p>
+        </div>
+        <div className="flex flex-col items-center justify-center h-48 text-center">
+          <Icon name="Clock" size={36} className="text-dim mb-3" />
+          <p className="text-dim text-sm">История пуста — выполните первый поиск</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="animate-fade-in space-y-6">
       <div>
@@ -418,8 +627,9 @@ function HistorySection() {
         <p className="text-sm text-dim">Ранее загруженные отчёты и извлечённые данные</p>
       </div>
       <div className="space-y-2">
-        {HISTORY.map((item, i) => (
-          <div key={i} className="flex items-center justify-between bg-surface-2 border border-surface-3 rounded px-4 py-3 hover:border-gold/40 transition-colors cursor-pointer">
+        {history.map((item, i) => (
+          <button key={i} onClick={() => onRestore(item)}
+            className="w-full flex items-center justify-between bg-surface-2 border border-surface-3 rounded px-4 py-3 hover:border-gold/40 transition-colors text-left">
             <div className="flex items-center gap-4">
               <div className="w-8 h-8 rounded bg-gold/10 flex items-center justify-center shrink-0">
                 <Icon name="Building2" size={16} className="text-gold" />
@@ -433,27 +643,27 @@ function HistorySection() {
               <span className="text-xs text-dim font-mono">{item.date}</span>
               <Icon name="ChevronRight" size={14} className="text-dim" />
             </div>
-          </div>
+          </button>
         ))}
       </div>
     </div>
   );
 }
 
-// ─── Help Section ─────────────────────────────────────────────────────────────
+// ─── Help Section ──────────────────────────────────────────────────────────────
 
 function HelpSection() {
   const sources = [
     { name: "e-disclosure.ru", desc: "Федеральный центр раскрытия корпоративной информации. МСФО, РСБУ, годовые отчёты, проспекты.", icon: "Globe" },
     { name: "Сайт компании", desc: "Раздел «Инвесторам» / «Акционерам». Databooks, Excel-приложения, презентации.", icon: "Building2" },
-    { name: "Форматы файлов", desc: "PDF (годовые отчёты), XLSX/XLS (databooks), ZIP/RAR (архивы с таблицами).", icon: "FileArchive" },
+    { name: "Форматы файлов", desc: "PDF (годовые отчёты), XLSX/XLS (databooks, финмодели), ZIP/RAR (архивы).", icon: "FileArchive" },
   ];
   const steps = [
     "Введите название компании, ИНН или биржевой тикер",
     "Выберите год и отчётный период (годовой / квартальный)",
-    "Нажмите «Найти отчётность» — сервис найдёт документы",
-    "Перейдите на вкладку «Показатели» и введите список нужных метрик",
-    "Нажмите «Извлечь показатели» — данные появятся в таблице",
+    "Нажмите «Найти отчётность» — сервис ищет документы на e-disclosure.ru",
+    "Перейдите на вкладку «Показатели» и выберите нужный документ",
+    "Введите список метрик (до 20) и нажмите «Извлечь показатели»",
     "Скопируйте таблицу в Excel или Google Таблицы одной кнопкой",
   ];
 
@@ -463,7 +673,6 @@ function HelpSection() {
         <h2 className="text-xl font-semibold mb-1">Справка</h2>
         <p className="text-sm text-dim">Как пользоваться сервисом и откуда берутся данные</p>
       </div>
-
       <div className="space-y-3">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-dim">Порядок работы</h3>
         <ol className="space-y-2">
@@ -475,7 +684,6 @@ function HelpSection() {
           ))}
         </ol>
       </div>
-
       <div className="space-y-3">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-dim">Источники данных</h3>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -490,12 +698,11 @@ function HelpSection() {
           ))}
         </div>
       </div>
-
       <div className="bg-gold/5 border border-gold/20 rounded p-4">
         <div className="flex items-start gap-3">
           <Icon name="Info" size={16} className="text-gold mt-0.5 shrink-0" />
           <p className="text-sm text-foreground/70 leading-relaxed">
-            Сервис ищет документы на e-disclosure.ru и сайте компании. Поддерживаются финансовые (МСФО/РСБУ), нефинансовые и ESG-метрики. До 20 показателей за один запрос.
+            Сервис ищет документы на e-disclosure.ru и сайте компании. Поддерживаются финансовые (МСФО/РСБУ), нефинансовые и ESG-метрики. До 20 показателей за один запрос. Если показатель не найден — попробуйте альтернативное название (например на английском).
           </p>
         </div>
       </div>
@@ -503,15 +710,40 @@ function HelpSection() {
   );
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── Main ──────────────────────────────────────────────────────────────────────
 
 export default function Index() {
   const [activeStep, setActiveStep] = useState<Step>("search");
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
-  const [hasResults, setHasResults] = useState(false);
+  const [metricRows, setMetricRows] = useState<MetricRow[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
 
-  const handleFound = (r: SearchResult) => setSearchResult(r);
-  const handleExtract = () => { setHasResults(true); setActiveStep("results"); };
+  const handleFound = (r: SearchResult) => {
+    setSearchResult(r);
+  };
+
+  const handleExtract = useCallback((rows: MetricRow[], docUrl: string) => {
+    setMetricRows(rows);
+    setActiveStep("results");
+    if (searchResult) {
+      const entry: HistoryEntry = {
+        company: searchResult.company,
+        period: `${searchResult.period} ${searchResult.year}`,
+        docs: searchResult.documents.length,
+        date: new Date().toLocaleDateString("ru-RU"),
+        metrics: rows.length,
+        result: searchResult,
+        rows,
+      };
+      setHistory(prev => [entry, ...prev.filter(h => h.company !== entry.company || h.period !== entry.period)].slice(0, 20));
+    }
+  }, [searchResult]);
+
+  const handleRestore = (entry: HistoryEntry) => {
+    setSearchResult(entry.result);
+    setMetricRows(entry.rows);
+    setActiveStep("results");
+  };
 
   const nav: { id: Step; label: string; icon: string }[] = [
     { id: "search", label: "Поиск компании", icon: "Search" },
@@ -538,7 +770,7 @@ export default function Index() {
           {searchResult && (
             <div className="hidden sm:flex items-center gap-2 bg-surface-2 border border-surface-3 rounded px-3 py-1.5">
               <Icon name="Building2" size={12} className="text-gold" />
-              <span className="text-xs text-foreground font-medium">{searchResult.company}</span>
+              <span className="text-xs text-foreground font-medium truncate max-w-48">{searchResult.company}</span>
               <span className="text-xs text-dim">· {searchResult.year}</span>
             </div>
           )}
@@ -563,8 +795,8 @@ export default function Index() {
               <Icon name={searchResult ? "CheckCircle2" : "Circle"} size={12} />
               Компания найдена
             </div>
-            <div className={`flex items-center gap-2 text-xs ${hasResults ? "text-emerald-400" : "text-dim"}`}>
-              <Icon name={hasResults ? "CheckCircle2" : "Circle"} size={12} />
+            <div className={`flex items-center gap-2 text-xs ${metricRows.length ? "text-emerald-400" : "text-dim"}`}>
+              <Icon name={metricRows.length ? "CheckCircle2" : "Circle"} size={12} />
               Данные извлечены
             </div>
           </div>
@@ -575,8 +807,8 @@ export default function Index() {
           <div className="max-w-3xl">
             {activeStep === "search" && <SearchSection onFound={handleFound} />}
             {activeStep === "metrics" && <MetricsSection result={searchResult} onExtract={handleExtract} />}
-            {activeStep === "results" && <ResultsSection result={hasResults ? searchResult : null} />}
-            {activeStep === "history" && <HistorySection />}
+            {activeStep === "results" && <ResultsSection result={searchResult} rows={metricRows} />}
+            {activeStep === "history" && <HistorySection history={history} onRestore={handleRestore} />}
             {activeStep === "help" && <HelpSection />}
           </div>
         </main>

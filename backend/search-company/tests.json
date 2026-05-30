@@ -1,0 +1,28 @@
+{
+  "tests": [
+    {
+      "name": "Поиск Газпром",
+      "method": "GET",
+      "path": "/?query=Газпром&year=2023&period=annual",
+      "expectedStatus": 200,
+      "expectedBody": {"query": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Поиск по ИНН",
+      "method": "GET",
+      "path": "/?query=7707083893&year=2023",
+      "expectedStatus": 200,
+      "expectedBody": {"companies": []},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Пустой запрос",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 400,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

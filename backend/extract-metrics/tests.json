@@ -1,0 +1,36 @@
+{
+  "tests": [
+    {
+      "name": "Валидный запрос — возвращает структуру",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "url": "https://example.com/report.pdf",
+        "metrics": ["Выручка", "Чистая прибыль"],
+        "company": "Тест",
+        "year": "2023"
+      },
+      "expectedStatus": 422,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Пустой URL",
+      "method": "POST",
+      "path": "/",
+      "body": {"url": "", "metrics": ["Выручка"]},
+      "expectedStatus": 400,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Пустой список показателей",
+      "method": "POST",
+      "path": "/",
+      "body": {"url": "https://example.com/report.pdf", "metrics": []},
+      "expectedStatus": 400,
+      "expectedBody": {"error": "string"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}
